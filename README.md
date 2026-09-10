@@ -34,7 +34,7 @@ deterministic operators for consistent numerical computation across rollout and 
 engines, together with hardware-specific kernels for faster execution and lower memory
 use in GRPO, PPO, and related workloads.
 
-Today, the end-to-end path covers **Qwen3-8B Dense with vime, vLLM, and Megatron-LM**.
+Today, the end-to-end path covers Qwen3-8B Dense with vime, vLLM, and Megatron-LM.
 Work on DeepSeek-V4 Flash MoE, Miles, and AReaL is ongoing.
 
 ## Why RL-Kernel?
