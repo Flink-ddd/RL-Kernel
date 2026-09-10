@@ -96,32 +96,13 @@ The current end-to-end path uses Qwen3-8B Dense with vime.
 
 ## Benchmark Highlights
 
-### vime native vs. RL-Kernel + vime
+### CUDA H100
 
-[PR #377](https://github.com/RL-Align/RL-Kernel/pull/377) compares vime native G10 with
-RL-Kernel G11. Both runs use vime, vLLM rollout, Megatron-LM training, and rollout LogP
-reuse. G11 uses RL-Kernel attention, FFN, and LogP in rollout and training.
+[![Qwen3-8B CUDA training, reward, and train–rollout consistency curves](./examples/vime_qwen3_8b_tp4_cp2_200/results/scale_reference_s1234_g10_g11_optimized/consistency-reward.png)](https://github.com/RL-Align/RL-Kernel/pull/377)
 
-**Setup:** Qwen3-8B BF16 · GRPO · 1 node with 8×H100 80GB · actor TP4, CP2, PP1 ·
-two TP4 rollout engines · 8 prompts × 16 samples (batch 128) · 200 steps · seed 1234 ·
-maximum response length 7,168 · KL-loss coefficient 0.001.
+### ROCm MI300X
 
-| Metric | vime native (G10) | vime + RL-Kernel (G11) | G11 result |
-| :--- | ---: | ---: | :--- |
-| Steps with nonzero train–rollout LogP mismatch | 200 of 200 | **0 of 200** | **Exact agreement at every step** |
-| Maximum absolute Δlogp across the run | 1.591547 | **0** | **Zero measured difference** |
-| Mean rollout time | 130.22 seconds per step | **82.75 seconds per step** | **36.5% lower** |
-| Mean rollout throughput | 672.39 tokens per GPU per second | **1,134.00 tokens per GPU per second** | **68.7% higher** |
-| Mean reference LogP time | 20.90 seconds per step | 20.92 seconds per step | Approximately equal |
-| Mean actor training time | **80.51 seconds per step** | 107.18 seconds per step | 33.1% higher |
-| Mean end-to-end step time | 251.99 seconds per step | **231.27 seconds per step** | **8.2% lower** |
-
-G11 saves **47.47 seconds per rollout step**, offsetting the additional actor training
-cost for a net saving of **20.72 seconds per end-to-end step**.
-
-![Qwen3-8B performance comparison: stage times, throughput, and relative changes for vime native G10 and optimized RL-Kernel G11](./docs/assets/qwen3-8b-performance-summary.png)
-
-![Qwen3-8B training, reward, and train–rollout consistency curves for G10 and optimized G11](./examples/vime_qwen3_8b_tp4_cp2_200/results/scale_reference_s1234_g10_g11_optimized/consistency-reward.png)
+[![Qwen3-8B ROCm training, reward, and train–rollout consistency curves](./examples/vime_qwen3_8b_tp4_cp2_200/results/pr396_rocm_s1234_g10_g11_200/consistency-reward.png)](https://github.com/RL-Align/RL-Kernel/pull/400)
 
 ## Hardware Support
 
