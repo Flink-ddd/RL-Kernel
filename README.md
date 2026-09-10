@@ -177,8 +177,7 @@ are welcome. See the [contributing guide](./docs/contributing/README.md).
 
 RL-Kernel builds on the work of the open-source AI infrastructure community, including
 [vime](https://github.com/vllm-project/vime), [vLLM](https://github.com/vllm-project/vllm),
-[Megatron-LM](https://github.com/NVIDIA/Megatron-LM),
-[DeepSpeed](https://github.com/deepspeedai/DeepSpeed), and
+[Megatron-LM](https://github.com/NVIDIA/Megatron-LM), and
 [FlashInfer](https://github.com/flashinfer-ai/flashinfer).
 We thank their contributors and everyone helping bring RL-Kernel to new accelerators.
 
