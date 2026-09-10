@@ -84,9 +84,13 @@ The current end-to-end path uses Qwen3-8B Dense with vime.
 
 [![Qwen3-8B CUDA training, reward, and train–rollout consistency curves](./examples/vime_qwen3_8b_tp4_cp2_200/results/scale_reference_s1234_g10_g11_optimized/consistency-reward.png)](https://github.com/RL-Align/RL-Kernel/pull/377)
 
+[![Qwen3-8B CUDA mean absolute train–rollout LogP difference on NVIDIA H100](./examples/vime_qwen3_8b_tp4_cp2_200/results/scale_reference_s1234_g10_g11_optimized/mean-logp-diff.png)](https://github.com/RL-Align/RL-Kernel/pull/377)
+
 ### ROCm MI300X
 
 [![Qwen3-8B ROCm training, reward, and train–rollout consistency curves](./examples/vime_qwen3_8b_tp4_cp2_200/results/pr396_rocm_s1234_g10_g11_200/consistency-reward.png)](https://github.com/RL-Align/RL-Kernel/pull/400)
+
+[![Qwen3-8B ROCm mean absolute train–rollout LogP difference on MI300X](./examples/vime_qwen3_8b_tp4_cp2_200/results/pr396_rocm_s1234_g10_g11_200/mean-logp-diff.png)](https://github.com/RL-Align/RL-Kernel/pull/400)
 
 ## Hardware Support
 
