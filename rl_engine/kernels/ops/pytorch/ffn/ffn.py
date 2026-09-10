@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 RL-Kernel Contributors
-"""Bias-free gated FFN assembled from deterministic CUDA kernels."""
+"""Bias-free gated FFN assembled from deterministic GPU kernels."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from rl_engine.distributed.collectives import (
     deterministic_staging_reserve,
 )
 from rl_engine.kernels.ops.base import _C, _EXT_AVAILABLE
-from rl_engine.kernels.ops.cuda.matmul.det_gemm import (
+from rl_engine.kernels.ops.matmul.det_gemm import (
     det_gemm_linear,
     det_gemm_linear_input_gradient,
     det_gemm_linear_weight_gradient,
@@ -47,6 +47,8 @@ _COLLECTIVE_MIN_CAPACITY_BYTES = 64 * 1024 * 1024
 # Backward-compatible test hook; ownership lives in the shared communication layer.
 _COLLECTIVES = _SHARED_COLLECTIVES
 _PACKED_INFERENCE_OBSERVERS: list[Callable[[], None]] = []
+_PACKED_INFERENCE_STAGING_BY_HANDLE: dict[int, tuple[int, Tensor, Tensor]] = {}
+_PACKED_INFERENCE_SLOT_BY_RUNTIME_HANDLE: dict[int, int] = {}
 
 
 def register_packed_inference_observer(callback: Callable[[], None]) -> None:
@@ -137,6 +139,71 @@ def _qwen3_ffn_packed_inference_to_staging_fake(
     del rmsnorm_output, fused_gate_up_weight, down_weight, output
 
 
+@torch.library.custom_op(
+    "rl_kernel::qwen3_ffn_packed_tp_inference_rocm",
+    mutates_args=(),
+)
+def _qwen3_ffn_packed_tp_inference_rocm(
+    rmsnorm_output: Tensor,
+    fused_gate_up_weight: Tensor,
+    down_weight: Tensor,
+    collective_handle: int,
+) -> Tensor:
+    """Keep the ROCm TP FFN behind one eager graph-partition boundary."""
+
+    binding = _PACKED_INFERENCE_STAGING_BY_HANDLE.get(collective_handle)
+    if binding is None:
+        raise RuntimeError("packed ROCm rollout FFN staging handle is not registered")
+    runtime_handle, staging, stable_output = binding
+    input_shape = rmsnorm_output.shape
+    rows = rmsnorm_output.numel() // input_shape[-1]
+    if rows <= staging.size(0):
+        # Keep the output address stable across piecewise HIP-graph capture and
+        # replay so the next captured partition reads the current invocation.
+        direct_input = staging.narrow(0, 0, rows)
+        output = stable_output.narrow(0, 0, rows)
+        _C.deterministic_collective_rocm_ipc_prepare_staged(
+            runtime_handle,
+            direct_input,
+        )
+        _qwen3_ffn_packed_inference_to_staging(
+            rmsnorm_output,
+            fused_gate_up_weight,
+            down_weight,
+            direct_input,
+        )
+        _C.deterministic_collective_rocm_ipc_all_reduce_staged(
+            runtime_handle, direct_input, output
+        )
+        return output.reshape(*input_shape[:-1], down_weight.shape[0])
+    else:
+        # Profiling and uncaptured prefill can exceed the decode capture bound.
+        output = _qwen3_ffn_packed_inference(
+            rmsnorm_output,
+            fused_gate_up_weight,
+            down_weight,
+        )
+    _C.deterministic_collective_rocm_ipc_all_reduce_input(
+        runtime_handle,
+        output,
+        output,
+    )
+    return output.reshape(*input_shape[:-1], down_weight.shape[0])
+
+
+@_qwen3_ffn_packed_tp_inference_rocm.register_fake
+def _qwen3_ffn_packed_tp_inference_rocm_fake(
+    rmsnorm_output: Tensor,
+    fused_gate_up_weight: Tensor,
+    down_weight: Tensor,
+    collective_handle: int,
+) -> Tensor:
+    del fused_gate_up_weight, collective_handle
+    return rmsnorm_output.new_empty(
+        (*rmsnorm_output.shape[:-1], down_weight.shape[0])
+    )
+
+
 def qwen3_ffn_packed_inference(
     rmsnorm_output: Tensor,
     fused_gate_up_weight: Tensor,
@@ -156,15 +223,39 @@ def qwen3_ffn_packed_inference(
         )
     if collective_handle <= 0:
         raise RuntimeError("packed rollout FFN requires a bound TP collective")
+    if (
+        getattr(torch.version, "hip", None) is not None
+        and collective is not None
+        and collective_handle not in _PACKED_INFERENCE_STAGING_BY_HANDLE
+    ):
+        # Eager ROCm does not reserve graph staging.  Keep its established
+        # in-place fixed-tree path; graph-enabled runs register the handle in
+        # prepare_packed_inference and stay behind the opaque custom op below.
+        output = _qwen3_ffn_packed_inference(
+            rmsnorm_output,
+            fused_gate_up_weight,
+            down_weight,
+        )
+        return collective.all_reduce(output, out=output)
+    if getattr(torch.version, "hip", None) is not None:
+        return _qwen3_ffn_packed_tp_inference_rocm(
+            rmsnorm_output,
+            fused_gate_up_weight,
+            down_weight,
+            collective_handle,
+        )
     input_shape = rmsnorm_output.shape
     output_shape_2d = (
         rmsnorm_output.numel() // input_shape[-1],
         down_weight.shape[0],
     )
+    direct_staging = None if collective is None else getattr(
+        collective, "direct_staging_view", None
+    )
     direct_output = (
         None
-        if collective is None
-        else collective.direct_staging_view(output_shape_2d, dtype=rmsnorm_output.dtype)
+        if not callable(direct_staging)
+        else direct_staging(output_shape_2d, dtype=rmsnorm_output.dtype)
     )
     if direct_output is not None:
         deterministic_staging_reserve(
@@ -201,9 +292,9 @@ def _require_ffn_kernels(*, disable_split_k: bool, packed_gate_up: bool = False)
     if not _EXT_AVAILABLE or _C is None or missing:
         suffix = f" Missing symbols: {', '.join(missing)}." if missing else ""
         needed = (
-            "compiled deterministic GEMM and SwiGLU CUDA kernels"
+            "compiled deterministic GEMM and SwiGLU GPU kernels"
             if disable_split_k
-            else "compiled SwiGLU CUDA kernels"
+            else "compiled SwiGLU GPU kernels"
         )
         raise RuntimeError(f"qwen3_ffn requires the {needed}.{suffix}")
 
@@ -306,7 +397,8 @@ def _validate_ffn_inputs(
         if tensor.dtype != torch.bfloat16:
             raise TypeError(f"{name} must have dtype bfloat16, got {tensor.dtype}.")
         if not tensor.is_cuda:
-            raise RuntimeError(f"{name} must be on a CUDA device, got '{tensor.device}'.")
+            # PyTorch exposes AMD GPU tensors through the torch.cuda API too.
+            raise RuntimeError(f"{name} must be on a CUDA/ROCm GPU device, got '{tensor.device}'.")
         if tensor.device != rmsnorm_output.device:
             raise RuntimeError(
                 f"all FFN inputs must be on {rmsnorm_output.device}, "
@@ -370,8 +462,14 @@ class _DeterministicFFNFunction(torch.autograd.Function):
         tp_world = tp_dist.get_world_size(group=tp_group) if tp_dist is not None else 1
         gemm_tokens = rmsnorm_output_2d.size(0) * (tp_world if sequence_parallel else 1)
         element_size = rmsnorm_output_2d.element_size()
+        token_hidden_bytes = gemm_tokens * rmsnorm_output_2d.size(1) * element_size
+        # Sequence-parallel backward reduces the gate and up input-gradient
+        # lanes together. ``reduce_scatter_many`` packs those lanes along the
+        # final dimension, so reserve capacity for both lanes in one transport
+        # call rather than growing the collective (or failing) mid-backward.
+        reduction_bytes = token_hidden_bytes * (2 if sequence_parallel else 1)
         min_size_bytes = max(
-            gemm_tokens * rmsnorm_output_2d.size(1) * element_size,
+            reduction_bytes,
             gemm_tokens * gate_weight.size(0) * element_size,
             gate_weight.numel() * element_size,
             up_weight.numel() * element_size,
@@ -541,28 +639,25 @@ class _DeterministicFFNFunction(torch.autograd.Function):
             gate_weight,
             disable_split_k=disable_split_k,
         )
-        if ctx.sequence_parallel:
-            grad_rmsnorm_from_gate = _reduce_scatter_tokens(
-                grad_rmsnorm_from_gate,
-                tp_collective,
-            )
-        elif tp_collective is not None:
-            grad_rmsnorm_from_gate = _all_reduce_inplace(
-                grad_rmsnorm_from_gate,
-                tp_collective,
-            )
-
         grad_rmsnorm_from_up = _linear_da(
             grad_up,
             up_weight,
             disable_split_k=disable_split_k,
         )
         if ctx.sequence_parallel:
-            grad_rmsnorm_from_up = _reduce_scatter_tokens(
-                grad_rmsnorm_from_up,
-                tp_collective,
+            # These are independent reduction lanes. Pack them into one
+            # ReduceScatter while keeping each lane's balanced rank tree
+            # separate; adding them before the collective would change the
+            # floating-point parenthesization and break cross-TP bitwise
+            # invariance.
+            grad_rmsnorm_from_gate, grad_rmsnorm_from_up = tp_collective.reduce_scatter_many(
+                (grad_rmsnorm_from_gate, grad_rmsnorm_from_up)
             )
         elif tp_collective is not None:
+            grad_rmsnorm_from_gate = _all_reduce_inplace(
+                grad_rmsnorm_from_gate,
+                tp_collective,
+            )
             grad_rmsnorm_from_up = _all_reduce_inplace(
                 grad_rmsnorm_from_up,
                 tp_collective,
@@ -612,7 +707,8 @@ def qwen3_ffn(
             unchanged.
         tp_group: Optional tensor-parallel process group. Gate and Up are
             column-parallel; Down is row-parallel. Reductions use the
-            deterministic fixed-tree collectives rather than NCCL.
+            platform deterministic fixed-tree collectives. On ROCm, RCCL only
+            transports rank inputs and the reduction tree executes locally.
         cp_group: Optional context-parallel process group. Each rank owns
             different token rows and the same local weight shards. Weight
             gradients AllGather tokens along CP and run the full-token
@@ -721,14 +817,57 @@ class Qwen3FFNOp:
         )
         max_capture = int(os.getenv("RL_KERNEL_VLLM_CUDAGRAPH_MAX_CAPTURE_SIZE", "0"))
         if max_capture <= 0:
+            if getattr(torch.version, "hip", None) is not None:
+                collective_handle = int(collective._handle)
+                self._packed_inference_collectives[collective_handle] = collective
+                return collective_handle, tp_world_size
             raise RuntimeError("packed rollout FFN requires a positive graph capture size")
         collective.prepare_direct_staging_views(
             ((batch, int(down_weight.shape[0])) for batch in range(1, max_capture + 1)),
             dtype=down_weight.dtype,
         )
-        collective_handle = int(collective._handle)
+        runtime_handle = int(collective._handle)
+        collective_handle = runtime_handle
+        if getattr(torch.version, "hip", None) is not None:
+            staging = collective.direct_staging_view(
+                (max_capture, int(down_weight.shape[0])),
+                dtype=down_weight.dtype,
+            )
+            if staging is None:
+                raise RuntimeError("packed ROCm rollout FFN staging allocation failed")
+            collective_handle = _PACKED_INFERENCE_SLOT_BY_RUNTIME_HANDLE.get(
+                runtime_handle, 0
+            )
+            if collective_handle == 0:
+                # Keep the AOT graph identity stable across worker processes;
+                # resolve its process-local C++ handle inside the custom op.
+                collective_handle = len(_PACKED_INFERENCE_SLOT_BY_RUNTIME_HANDLE) + 1
+                _PACKED_INFERENCE_SLOT_BY_RUNTIME_HANDLE[runtime_handle] = (
+                    collective_handle
+                )
+            binding = _PACKED_INFERENCE_STAGING_BY_HANDLE.get(collective_handle)
+            stable_output = (
+                torch.empty_like(staging) if binding is None else binding[2]
+            )
+            _PACKED_INFERENCE_STAGING_BY_HANDLE[collective_handle] = (
+                runtime_handle,
+                staging,
+                stable_output,
+            )
         self._packed_inference_collectives[collective_handle] = collective
         return collective_handle, tp_world_size
+
+    def packed_inference_backend_id(self, collective_handle: int) -> str:
+        collective = self._packed_inference_collectives.get(collective_handle)
+        if collective is None:
+            raise RuntimeError("packed rollout FFN collective is not bound")
+        return str(
+            getattr(
+                collective,
+                "backend_id",
+                "deterministic_all_reduce.ipc_localized_fixed_tree.v1",
+            )
+        )
 
     def packed_inference(
         self,

@@ -14,7 +14,7 @@ import os
 from dataclasses import replace
 from functools import lru_cache
 from threading import Lock
-from typing import Any, Mapping, cast
+from typing import Any, Callable, Mapping, cast
 
 import torch
 
@@ -23,6 +23,8 @@ from rl_engine.integrations.linear_logp import LinearLogpWrapper, take_rollout_l
 from rl_engine.kernels.attention_contract import (
     STRICT_ATTENTION_FA4_SCHEDULE_ID,
     STRICT_ATTENTION_PRODUCTION_CORE_ID,
+    STRICT_ATTENTION_ROCM_PRODUCTION_CORE_ID,
+    STRICT_ATTENTION_ROCM_SCHEDULE_ID,
     AttentionContract,
     AttentionDType,
     AttentionMode,
@@ -31,10 +33,11 @@ from rl_engine.kernels.attention_contract import (
 from rl_engine.kernels.attention_contract import ReductionSpec as AttentionReductionSpec
 from rl_engine.kernels.attention_contract import ShardingSpec as AttentionShardingSpec
 from rl_engine.kernels.attention_contract import SplitKVSpec
+from rl_engine.kernels.attention_projection import ROCM_DETERMINISTIC_PROJECTION_BACKEND_ID
 from rl_engine.kernels.logprob_contract import LogprobContract, LogprobDType, LogprobRole, MaskSpec
 from rl_engine.kernels.logprob_contract import ReductionSpec as LogprobReductionSpec
 from rl_engine.kernels.logprob_contract import ShardingSpec as LogprobShardingSpec
-from rl_engine.kernels.ops.cuda.matmul.det_gemm import det_gemm_backend_id
+from rl_engine.kernels.ops.matmul.det_gemm import DetGemmOp, det_gemm_backend_id
 from rl_engine.kernels.ops.pytorch.attention.ablation import AttentionAblationConfig
 from rl_engine.kernels.ops.pytorch.loss.vocab_parallel_logp import BACKEND_ID as LOGP_BACKEND_ID
 from rl_engine.kernels.ops.pytorch.loss.vocab_parallel_logp import DEFAULT_NUM_VOCAB_TILES
@@ -43,6 +46,10 @@ from rl_engine.runtime_mode import strict_contract_enabled
 
 ATTENTION_BACKEND_ID = "rlkernel.attention.deterministic.v1"
 FFN_BACKEND_ID = "rlkernel.ffn.qwen3.deterministic.v1"
+_MEGATRON_TP_QKV_DGRAD_COLLECTIVE_ATTR = "__rl_kernel_tp_qkv_dgrad_collective_backend__"
+_MEGATRON_TP_OUTPUT_PROJECTION_COLLECTIVE_ATTR = (
+    "__rl_kernel_tp_output_projection_collective_backend__"
+)
 
 
 def _device_name(tensor: torch.Tensor) -> str:
@@ -117,8 +124,58 @@ def _attention_dtype(tensor: torch.Tensor) -> AttentionDType:
 
 
 def _require_nvidia_cuda(tensor: torch.Tensor, module: str) -> None:
-    if tensor.device.type != "cuda" or torch.version.hip is not None:
-        raise RuntimeError(f"strict {module} R/R requires NVIDIA CUDA tensors")
+    if tensor.device.type != "cuda":
+        raise RuntimeError(f"strict {module} R/R requires CUDA/ROCm GPU tensors")
+
+
+def _require_attention_accelerator(tensor: torch.Tensor) -> str:
+    """Return the real Attention platform behind PyTorch's CUDA device API."""
+
+    if tensor.device.type != "cuda":
+        raise RuntimeError("strict Attention R/R requires CUDA or ROCm GPU tensors")
+    return "rocm" if torch.version.hip is not None else "cuda"
+
+
+def _strict_attention_platform_contract(platform: str) -> tuple[str, str, str]:
+    if platform == "rocm":
+        return (
+            STRICT_ATTENTION_ROCM_PRODUCTION_CORE_ID,
+            STRICT_ATTENTION_ROCM_SCHEDULE_ID,
+            "rccl_ag_rs",
+        )
+    if platform == "cuda":
+        return (
+            STRICT_ATTENTION_PRODUCTION_CORE_ID,
+            STRICT_ATTENTION_FA4_SCHEDULE_ID,
+            "cuda_ag_rs",
+        )
+    raise RuntimeError(f"unsupported strict Attention platform {platform!r}")
+
+
+def _strict_attention_projection_backend_id(platform: str) -> str:
+    if platform == "rocm":
+        return ROCM_DETERMINISTIC_PROJECTION_BACKEND_ID
+    if platform == "cuda":
+        return det_gemm_backend_id()
+    raise RuntimeError(f"unsupported Attention projection platform {platform!r}")
+
+
+def _strict_attention_projection_provenance(platform: str) -> dict[str, Any]:
+    return {
+        "backend_id": _strict_attention_projection_backend_id(platform),
+        "deterministic": True,
+        "accumulation_dtype": "fp32",
+        "reduction_order": "k_ascending",
+        "split_k": False,
+        "roles": ["qkv", "o_proj"],
+        "triton_used": platform == "rocm",
+    }
+
+
+def _strict_attention_projection_op() -> Any:
+    """Construct the deterministic projection selected for this PyTorch build."""
+
+    return DetGemmOp()
 
 
 class SemanticOperatorHandle:
@@ -321,14 +378,39 @@ def _packed_local_sequence_layout(
 def _tensor_cache_token(tensor: torch.Tensor) -> tuple[Any, ...]:
     """Identify one tensor value while it is reused across framework layers."""
 
+    try:
+        version: int | None = int(tensor._version)
+    except RuntimeError:
+        # vLLM warmup runs under inference mode.  Inference tensors have no
+        # version counter, but their storage address and metadata remain valid
+        # cache identity for the lifetime of that model forward.
+        version = None
     return (
         tensor.data_ptr(),
         tuple(tensor.shape),
         tensor.dtype,
         tensor.device.type,
         tensor.device.index,
-        int(tensor._version),
+        version,
     )
+
+
+@lru_cache(maxsize=1)
+def _rocm_paged_kv_max_tokens() -> int | None:
+    """Return an optional workload bound for AITER paged scheduling."""
+
+    value = os.environ.get("RL_KERNEL_ROCM_PAGED_KV_MAX_TOKENS", "").strip()
+    if not value:
+        return None
+    try:
+        limit = int(value)
+    except ValueError as exc:
+        raise RuntimeError(
+            "RL_KERNEL_ROCM_PAGED_KV_MAX_TOKENS must be an integer"
+        ) from exc
+    if limit <= 0:
+        raise RuntimeError("RL_KERNEL_ROCM_PAGED_KV_MAX_TOKENS must be positive")
+    return limit
 
 
 def _compact_attention_provenance(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -413,6 +495,13 @@ class MegatronAttentionOperator:
         self._packed_layout_key: tuple[Any, ...] | None = None
         self._packed_layout_value: tuple[tuple[int, ...], tuple[int, ...]] | None = None
         self._position_ids_cache: dict[tuple[Any, ...], torch.Tensor] = {}
+
+    @staticmethod
+    def _tp_collective_backend(module: Any, attribute: str, tp_world: int) -> str:
+        value = getattr(module, attribute, None)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return "none" if tp_world == 1 else "unbound"
 
     def _position_ids(
         self,
@@ -507,7 +596,10 @@ class MegatronAttentionOperator:
         if query.ndim != expected_ndim or key.ndim != expected_ndim or value.ndim != expected_ndim:
             layout = "[T, H, D]" if packed_seq_params is not None else "[S, B, H, D]"
             raise RuntimeError(f"Megatron Attention Q/K/V must use {layout}")
-        _require_nvidia_cuda(query, "Attention")
+        runtime_platform = _require_attention_accelerator(query)
+        strict_core_id, strict_schedule, communication_backend = (
+            _strict_attention_platform_contract(runtime_platform)
+        )
 
         parallel_state = _megatron_parallel_state()
         cp_world = int(parallel_state.get_context_parallel_world_size())
@@ -523,7 +615,7 @@ class MegatronAttentionOperator:
                 "context_parallel_size": cp_world,
             },
         )
-        operator.bind_cuda_runtime(process_group=cp_group)
+        operator.bind_accelerator_runtime(query, process_group=cp_group)
         scale = float(getattr(module, "softmax_scale", query.size(-1) ** -0.5))
 
         def execute_sequence(
@@ -564,11 +656,11 @@ class MegatronAttentionOperator:
                     local_block_offsets=block_offsets,
                 ),
                 config=AttentionAblationConfig(
-                    strict_core_id=STRICT_ATTENTION_PRODUCTION_CORE_ID,
-                    strict_schedule=STRICT_ATTENTION_FA4_SCHEDULE_ID,
+                    strict_core_id=strict_core_id,
+                    strict_schedule=strict_schedule,
                 ),
                 return_lse=True,
-                communication_backend="cuda_ag_rs" if cp_world > 1 else "none",
+                communication_backend=communication_backend if cp_world > 1 else "none",
                 query_position_ids=position_ids,
                 key_position_ids=position_ids,
                 scale=scale,
@@ -664,13 +756,21 @@ class MegatronAttentionOperator:
                 if packed_seq_params is not None
                 else "megatron_sbh_zigzag_cp"
             ),
-            "materialization": "owner_local_zigzag_cuda_ag_rs",
+            "materialization": f"owner_local_zigzag_{communication_backend}",
             "cp_world_size": cp_world,
             "tp_world_size": tp_world,
-            "runtime_platform": "cuda",
-            "triton_used": False,
-            "tp_output_projection_collective": (
-                "deterministic_all_reduce.ipc_localized_fixed_tree.v1"
+            "runtime_platform": runtime_platform,
+            "triton_used": runtime_platform == "rocm",
+            "deterministic_projection": _strict_attention_projection_provenance(runtime_platform),
+            "tp_qkv_dgrad_collective": self._tp_collective_backend(
+                module,
+                _MEGATRON_TP_QKV_DGRAD_COLLECTIVE_ATTR,
+                tp_world,
+            ),
+            "tp_output_projection_collective": self._tp_collective_backend(
+                module,
+                _MEGATRON_TP_OUTPUT_PROJECTION_COLLECTIVE_ATTR,
+                tp_world,
             ),
             **execution_provenance,
         }
@@ -756,12 +856,25 @@ class MegatronFFNOperator:
             "framework_layout": "megatron_sequence_parallel",
             "cp_world_size": cp_world,
             "tp_world_size": tp_world,
-            "runtime_platform": "cuda",
-            "actual_backend": "rlkernel.cuda.det_gemm_swiglu",
+            "runtime_platform": _device_name(hidden_states),
+            "actual_backend": (
+                "rlkernel.rocm.det_gemm_swiglu"
+                if torch.version.hip is not None
+                else "rlkernel.cuda.det_gemm_swiglu"
+            ),
             "gemm_backend": det_gemm_backend_id(),
             "fallback": False,
             "gate_up_projection": "separate_strict_launches",
-            "triton_used": False,
+            "deterministic_all_reduce_backend": (
+                "none"
+                if tp_world == 1
+                else (
+                    "rocm_ipc_fixed_tree"
+                    if torch.version.hip is not None
+                    else "deterministic_all_reduce.ipc_localized_fixed_tree.v1"
+                )
+            ),
+            "triton_used": torch.version.hip is not None,
         }
         return output, None
 
@@ -783,17 +896,77 @@ def _vllm_kv_cache_views(
     kv_cache: torch.Tensor,
     *,
     head_size: int,
+    num_kv_heads: int | None = None,
+    platform: str | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return vLLM's paged cache as [blocks, block, kv_heads, head]."""
+    """Return CUDA and ROCm vLLM caches as [blocks, block, kv_heads, head]."""
 
+    def normalize(plane: torch.Tensor) -> torch.Tensor:
+        if plane.ndim != 4 or plane.size(-1) != head_size:
+            raise RuntimeError("vLLM K/V cache planes must be 4-D with a head-size tail")
+        if num_kv_heads is None or plane.size(2) == num_kv_heads:
+            # [blocks, block, heads, head] (LBHNC after selecting K/V).
+            return plane
+        if plane.size(1) == num_kv_heads:
+            # [blocks, heads, block, head].
+            return plane.permute(0, 2, 1, 3)
+        if plane.size(0) == num_kv_heads:
+            # [heads, blocks, block, head] (LHBNC after selecting K/V).
+            return plane.permute(1, 2, 0, 3)
+        raise RuntimeError("vLLM K/V cache layout does not expose the declared number of KV heads")
+
+    # RL-Kernel's ROCm backend allocates token-major pages so AITER CK can read
+    # the paged cache directly.  Splitting the packed tail is then a zero-copy
+    # [blocks, block, heads, head] view with page-major strides.  Native AITER
+    # keeps the head dimension before the block dimension and still needs the
+    # transpose below.
     if kv_cache.ndim == 4 and kv_cache.size(-1) == 2 * head_size:
+        if (
+            platform == "rocm"
+            and num_kv_heads is not None
+            and kv_cache.size(2) == num_kv_heads
+            and kv_cache.size(1) != num_kv_heads
+        ):
+            return kv_cache.split(head_size, dim=-1)
         return kv_cache.transpose(1, 2).split(head_size, dim=-1)
+    if (
+        kv_cache.ndim == 4
+        and platform == "rocm"
+        and kv_cache.size(1) == 2
+        and num_kv_heads is not None
+        and kv_cache.size(-1) == num_kv_heads * head_size
+    ):
+        key_cache, value_cache = kv_cache.unbind(1)
+        blocks, block_size, _packed_heads = key_cache.shape
+        return (
+            key_cache.view(blocks, block_size, num_kv_heads, head_size),
+            value_cache.view(blocks, block_size, num_kv_heads, head_size),
+        )
+    # The K/V axis is leading in CUDA FlashAttention caches and follows the
+    # block axis in the ROCm AITER layouts.  Prefer the platform convention in
+    # the ambiguous two-block case where both dimensions happen to equal two.
+    if kv_cache.ndim == 5 and platform == "rocm" and kv_cache.size(1) == 2:
+        key_cache, value_cache = kv_cache.unbind(1)
+        return normalize(key_cache), normalize(value_cache)
     if kv_cache.ndim == 5 and kv_cache.size(0) == 2:
         key_cache, value_cache = kv_cache.unbind(0)
-        return key_cache, value_cache
-    raise RuntimeError(
-        "vLLM FlashAttention KV cache must use " "[blocks, kv_heads, block, 2 * head_size]"
-    )
+        return normalize(key_cache), normalize(value_cache)
+    if kv_cache.ndim == 5 and kv_cache.size(1) == 2:
+        key_cache, value_cache = kv_cache.unbind(1)
+        return normalize(key_cache), normalize(value_cache)
+    if (
+        kv_cache.ndim == 4
+        and kv_cache.size(1) == 2
+        and num_kv_heads is not None
+        and kv_cache.size(-1) == num_kv_heads * head_size
+    ):
+        key_cache, value_cache = kv_cache.unbind(1)
+        blocks, block_size, _packed_heads = key_cache.shape
+        return (
+            key_cache.view(blocks, block_size, num_kv_heads, head_size),
+            value_cache.view(blocks, block_size, num_kv_heads, head_size),
+        )
+    raise RuntimeError("vLLM Attention KV cache does not match a supported CUDA/ROCm paged layout")
 
 
 class VllmAttentionOperator:
@@ -801,15 +974,30 @@ class VllmAttentionOperator:
 
     backend_id = ATTENTION_BACKEND_ID
 
-    def __init__(self, handle: SemanticOperatorHandle | None = None) -> None:
+    def __init__(
+        self,
+        handle: SemanticOperatorHandle | None = None,
+        *,
+        projection_collective_backend: Callable[[], str | None] | None = None,
+    ) -> None:
         self._handle = handle or SemanticOperatorHandle(
             target="rollout", semantic_op="attention", backend_id=self.backend_id
         )
+        self._projection_collective_backend = projection_collective_backend
         self._last_provenance: dict[str, Any] = {}
         self._tp_coordinates: tuple[int, int, Any] | None = None
         self._metadata_cache_key: tuple[Any, ...] | None = None
         self._metadata_cache_owners: set[int] = set()
         self._metadata_cache_value: tuple[list[dict[str, Any]], dict[str, Any]] | None = None
+        self._dense_prefill_layout_key: tuple[Any, ...] | None = None
+        self._dense_prefill_layout_value: tuple[tuple[int, ...], tuple[int, ...]] | None = None
+        self._dense_prefill_position_ids: dict[tuple[Any, ...], torch.Tensor] = {}
+        self._rocm_decode_warmup_key: tuple[Any, ...] | None = None
+        self._rocm_paged_metadata_key: tuple[Any, ...] | None = None
+        self._rocm_paged_metadata_owners: set[int] = set()
+        self._rocm_paged_metadata_value: dict[str, Any] | None = None
+        self._rocm_kv_indptr_cache: dict[tuple[Any, ...], torch.Tensor] = {}
+        self._phase_provenance: dict[str, dict[str, Any]] = {}
 
     def bind_inference(self) -> None:
         """Resolve the backend after vLLM has selected the worker CUDA device."""
@@ -828,15 +1016,122 @@ class VllmAttentionOperator:
         )
         self._tp_coordinates = (tp_world, tp_rank, tp_group)
 
+    def warmup_rocm_decode(self, impl: Any, *, dtype: torch.dtype) -> None:
+        """Warm the exact strict decode schedule before rollout timing."""
+
+        if torch.version.hip is None or dtype not in (torch.float16, torch.bfloat16):
+            return
+        device = torch.device("cuda", torch.cuda.current_device())
+        key = (
+            device.index,
+            dtype,
+            int(impl.num_heads),
+            int(impl.num_kv_heads),
+            int(impl.head_size),
+        )
+        if self._rocm_decode_warmup_key == key:
+            return
+        if self._tp_coordinates is None:
+            self.bind_inference()
+        assert self._tp_coordinates is not None
+        tp_world, _tp_rank, _tp_group = self._tp_coordinates
+        bound = self._handle.get(
+            torch.empty((1,), device=device, dtype=dtype),
+            topology={
+                "world_size": tp_world,
+                "tensor_parallel_size": tp_world,
+                "context_parallel_size": 1,
+            },
+        )
+        runtime = bound.bind_accelerator_runtime(
+            torch.empty((1,), device=device, dtype=dtype)
+        )
+        page_size = 16
+        core = getattr(runtime, "_core", None)
+        if getattr(core, "attention_backend", "ck") == "triton":
+            from rl_engine.kernels.ops.triton.attention import chunked_flash_attn
+
+            chunked_flash_attn.warmup(
+                device,
+                num_q_heads=int(impl.num_heads),
+                num_kv_heads=int(impl.num_kv_heads),
+                dtype=dtype,
+            )
+            from rl_engine.kernels.ops.triton.matmul import mfma_gemm
+
+            mfma_gemm.warmup(device)
+        q = torch.empty(
+            (1, int(impl.num_heads), 1, int(impl.head_size)),
+            device=device,
+            dtype=dtype,
+        )
+        cache_shape = (
+            1,
+            page_size,
+            int(impl.num_kv_heads),
+            int(impl.head_size),
+        )
+        k_cache = torch.empty(cache_shape, device=device, dtype=dtype)
+        v_cache = torch.empty_like(k_cache)
+        page_table = torch.zeros((1, 1), device=device, dtype=torch.int32)
+        seqused_k = torch.full((1,), page_size, device=device, dtype=torch.int32)
+        cu_seqlens_q = torch.tensor((0, 1), device=device, dtype=torch.int32)
+        kv_indptr = torch.tensor((0, 1), device=device, dtype=torch.int32)
+        out = torch.empty_like(q)
+        with torch.inference_mode():
+            runtime.forward_paged_with_lse(
+                q,
+                k_cache,
+                v_cache,
+                page_table=page_table,
+                seqused_k=seqused_k,
+                max_seqlen_k=page_size,
+                scale=float(impl.scale),
+                out=out,
+                return_lse=False,
+                page_table_validated=True,
+                cu_seqlens_q=cu_seqlens_q,
+                kv_indptr=kv_indptr,
+            )
+            dense_q = torch.empty(
+                (1, int(impl.num_heads), page_size, int(impl.head_size)),
+                device=device,
+                dtype=dtype,
+            )
+            dense_k = k_cache.permute(0, 2, 1, 3).contiguous()
+            dense_v = v_cache.permute(0, 2, 1, 3).contiguous()
+            positions = torch.arange(page_size, device=device, dtype=torch.int64).unsqueeze(0)
+            runtime._core.forward_with_lse(
+                dense_q,
+                dense_k,
+                dense_v,
+                causal=True,
+                scale=float(impl.scale),
+                query_position_ids=positions,
+                key_position_ids=positions,
+            )
+        torch.cuda.synchronize(device)
+        self._rocm_decode_warmup_key = key
+
     @property
     def provenance(self) -> Mapping[str, Any]:
+        execution = self._phase_provenance.get("decode", self._last_provenance)
         return {
             "interface": "vllm.attention.forward",
             "operator": self.backend_id,
             "fallback": False,
             "semantic_instance": self._handle.provenance,
-            "execution": dict(self._last_provenance),
+            "execution": {
+                **dict(execution),
+                "captured_attention_phases": sorted(self._phase_provenance),
+            },
         }
+
+    def _record_phase_provenance(
+        self, phase: str, provenance: dict[str, Any]
+    ) -> None:
+        self._last_provenance = provenance
+        self._phase_provenance[phase] = provenance
 
     @staticmethod
     def _metadata_tensor(metadata: Any, *names: str) -> torch.Tensor:
@@ -845,6 +1140,478 @@ class VllmAttentionOperator:
             if isinstance(value, torch.Tensor):
                 return value
         raise RuntimeError(f"vLLM Attention metadata is missing {'/'.join(names)}")
+
+    def _dense_prefill_layout(
+        self,
+        starts_cpu: torch.Tensor,
+        lengths_cpu: torch.Tensor,
+        *,
+        num_prefills: int,
+        num_actual: int,
+    ) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        """Cache the host-only request layout across the decoder layers."""
+
+        key = (
+            _tensor_cache_token(starts_cpu),
+            _tensor_cache_token(lengths_cpu),
+            num_prefills,
+            num_actual,
+        )
+        if self._dense_prefill_layout_key == key:
+            if self._dense_prefill_layout_value is None:
+                raise RuntimeError("dense prefill layout cache is empty")
+            return self._dense_prefill_layout_value
+        starts = tuple(int(v) for v in starts_cpu[: num_prefills + 1].tolist())
+        lengths = tuple(int(v) for v in lengths_cpu[:num_prefills].tolist())
+        value = (starts, lengths)
+        self._dense_prefill_layout_key = key
+        self._dense_prefill_layout_value = value
+        return value
+
+    def _dense_prefill_positions(
+        self,
+        length: int,
+        *,
+        device: torch.device,
+    ) -> torch.Tensor:
+        key = (int(length), device.type, device.index)
+        cached = self._dense_prefill_position_ids.get(key)
+        if cached is not None:
+            return cached
+        if len(self._dense_prefill_position_ids) >= 128:
+            self._dense_prefill_position_ids.pop(next(iter(self._dense_prefill_position_ids)))
+        value = torch.arange(length, dtype=torch.int64, device=device).unsqueeze(0)
+        self._dense_prefill_position_ids[key] = value
+        return value
+
+    def _rocm_dense_prefill(
+        self,
+        impl: Any,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        value: torch.Tensor | None,
+        output: torch.Tensor,
+        attn_metadata: Any,
+        runtime: Any,
+        *,
+        tp_rank: int,
+        tp_world: int,
+        num_actual: int,
+    ) -> torch.Tensor | None:
+        """Schedule pure prefill as dense per-request AITER launches.
+
+        vLLM hands prefill Q/K/V in logical token order. Reusing those tensors
+        avoids turning every token into a paged decode row (thousands of
+        launches for one prompt) while keeping the strict runtime's one KV
+        group reduction order identical to training.
+        """
+
+        if key is None or value is None:
+            return None
+        if query.ndim != 3 or key.ndim != 3 or value.ndim != 3:
+            return None
+        if int(getattr(attn_metadata, "num_decodes", 0)) != 0:
+            return None
+        num_prefills = int(getattr(attn_metadata, "num_prefills", 0))
+        if num_prefills <= 0 or int(getattr(attn_metadata, "num_extends", 0)) != 0:
+            return None
+        starts_cpu = getattr(attn_metadata, "_rlk_query_start_loc_cpu", None)
+        lengths_cpu = getattr(attn_metadata, "_rlk_seq_lens_cpu", None)
+        if not isinstance(starts_cpu, torch.Tensor) or starts_cpu.device.type != "cpu":
+            return None
+        if not isinstance(lengths_cpu, torch.Tensor) or lengths_cpu.device.type != "cpu":
+            return None
+        if starts_cpu.numel() < num_prefills + 1 or lengths_cpu.numel() < num_prefills:
+            return None
+        starts, lengths = self._dense_prefill_layout(
+            starts_cpu,
+            lengths_cpu,
+            num_prefills=num_prefills,
+            num_actual=num_actual,
+        )
+        if starts[0] != 0 or starts[-1] != num_actual:
+            return None
+        if any(end <= start or end - start != length for start, end, length in zip(
+            starts[:-1], starts[1:], lengths, strict=True
+        )):
+            return None
+
+        output_heads = output.view(output.size(0), impl.num_heads, impl.head_size)
+        for start, end in zip(starts[:-1], starts[1:], strict=True):
+            query_row = query[start:end].permute(1, 0, 2).unsqueeze(0).contiguous()
+            key_row = key[start:end].permute(1, 0, 2).unsqueeze(0).contiguous()
+            value_row = value[start:end].permute(1, 0, 2).unsqueeze(0).contiguous()
+            position_ids = self._dense_prefill_positions(
+                end - start,
+                device=query.device,
+            )
+            result = runtime.forward_with_lse(
+                query_row,
+                key_row,
+                value_row,
+                contract=_dense_attention_contract(
+                    query_row,
+                    key_row,
+                    role=AttentionRole.INFER,
+                    causal=True,
+                    tp_rank=tp_rank,
+                    tp_world_size=tp_world,
+                    mode=AttentionMode.PREFILL,
+                    global_sequence_length=end - start,
+                ),
+                causal=True,
+                scale=float(impl.scale),
+                cp_world_size=1,
+                query_position_ids=position_ids,
+                key_position_ids=position_ids,
+                positions_are_sorted=True,
+            )
+            # vLLM uses a rank-3 output buffer at this boundary
+            # ([tokens, heads, head_dim]); older integrations may provide the
+            # equivalent flattened rank-2 view. Write through output_heads so
+            # the adapter preserves the framework-owned layout in both cases.
+            result_output = result.out.permute(0, 2, 1, 3).squeeze(0)
+            output_group = output_heads.narrow(0, start, end - start)
+            if result_output.shape != output_group.shape:
+                raise RuntimeError(
+                    "strict ROCm dense prefill output shape does not match vLLM: "
+                    f"result={tuple(result_output.shape)}, "
+                    f"output={tuple(output_group.shape)}"
+                )
+            output_group.copy_(result_output)
+        if num_actual < output.size(0):
+            output[num_actual:].zero_()
+        self._record_phase_provenance("prefill", {
+            "framework_layout": "vllm_dense_qkv_prefill",
+            "materialization": "direct_dense_qkv_to_aiter_ck",
+            "tp_world_size": tp_world,
+            "runtime_platform": "rocm",
+            "triton_used": True,
+            "prefill_request_count": num_prefills,
+            "prefill_token_count": num_actual,
+            "core_launch_count": num_prefills,
+            "deterministic_projection": _strict_attention_projection_provenance("rocm"),
+            "deterministic_all_reduce_backend": "unbound" if tp_world > 1 else "none",
+            "direct_output_buffer": True,
+        })
+        return output
+
+    def _rocm_direct_paged_metadata(
+        self,
+        attn_metadata: Any,
+        *,
+        block_table: torch.Tensor,
+        block_size: int,
+        num_actual: int,
+        cache_owner: Any,
+        runtime_core: Any = None,
+    ) -> tuple[dict[str, Any], bool] | None:
+        """Prepare graph-safe paged metadata once and share it across layers."""
+
+        num_decodes = int(getattr(attn_metadata, "num_decodes", 0))
+        num_prefills = int(getattr(attn_metadata, "num_prefills", 0))
+        num_extends = int(getattr(attn_metadata, "num_extends", 0))
+        unified = bool(getattr(runtime_core, "supports_mixed_paged_batches", False))
+        if unified:
+            # The chunked Triton contract serves every request kind from one
+            # causal launch, so mixed decode/extend/prefill batches need no
+            # per-kind expansion.
+            if num_decodes + num_extends + num_prefills <= 0 or num_actual <= 0:
+                return None
+            if num_extends or (num_decodes > 0 and num_prefills > 0):
+                mode = "mixed"
+            elif num_prefills > 0:
+                mode = "prefill"
+            else:
+                mode = "decode"
+            sequence_count = num_decodes + num_extends + num_prefills
+            query_start_loc = self._metadata_tensor(attn_metadata, "query_start_loc")
+            max_seqlen_q = int(getattr(attn_metadata, "max_query_len", 0) or 0)
+            if max_seqlen_q <= 0:
+                lengths = [
+                    int(getattr(meta, "max_query_len", 0) or 0)
+                    for meta in (
+                        getattr(attn_metadata, "decode_metadata", None),
+                        getattr(attn_metadata, "extend_metadata", None),
+                        getattr(attn_metadata, "prefill_metadata", None),
+                    )
+                    if meta is not None
+                ]
+                max_seqlen_q = max(lengths) if lengths else 0
+            causal = True
+        elif num_extends or (num_decodes > 0) == (num_prefills > 0):
+            return None
+        else:
+            mode = "prefill" if num_prefills > 0 else "decode"
+            sequence_count = num_prefills if num_prefills > 0 else num_decodes
+        if sequence_count <= 0 or num_actual <= 0:
+            return None
+        if unified:
+            pass
+        elif mode == "prefill":
+            prefill = getattr(attn_metadata, "prefill_metadata", None)
+            if prefill is None:
+                return None
+            query_start_loc = getattr(prefill, "query_start_loc", None)
+            max_seqlen_q = int(getattr(prefill, "max_query_len", 0))
+            causal = bool(getattr(attn_metadata, "causal", True))
+        else:
+            decode = getattr(attn_metadata, "decode_metadata", None)
+            if decode is None:
+                return None
+            query_start_loc = self._metadata_tensor(attn_metadata, "query_start_loc")
+            max_seqlen_q = int(getattr(decode, "max_query_len", 0))
+            causal = False
+        if not isinstance(query_start_loc, torch.Tensor) or max_seqlen_q <= 0:
+            return None
+        query_starts_source = query_start_loc
+        seq_lens_source = self._metadata_tensor(attn_metadata, "seq_lens")
+        max_seq_len = int(
+            getattr(attn_metadata, "max_seq_len", block_table.size(1) * block_size)
+        )
+        configured_kv_limit = _rocm_paged_kv_max_tokens()
+        kernel_max_seqlen_k = (
+            max_seq_len
+            if configured_kv_limit is None
+            else min(max_seq_len, configured_kv_limit)
+        )
+        page_count = min(
+            block_table.size(1),
+            (max_seq_len + block_size - 1) // block_size,
+        )
+        key = (
+            mode,
+            unified,
+            _tensor_cache_token(query_starts_source),
+            _tensor_cache_token(seq_lens_source),
+            _tensor_cache_token(block_table),
+            sequence_count,
+            num_actual,
+            max_seqlen_q,
+            max_seq_len,
+            kernel_max_seqlen_k,
+            page_count,
+        )
+        owner_id = id(cache_owner)
+        if (
+            self._rocm_paged_metadata_key == key
+            and owner_id not in self._rocm_paged_metadata_owners
+            and self._rocm_paged_metadata_value is not None
+        ):
+            self._rocm_paged_metadata_owners.add(owner_id)
+            return self._rocm_paged_metadata_value, True
+
+        query_start_loc = query_starts_source.to(
+            device=block_table.device, dtype=torch.int32
+        )
+        if not query_start_loc.is_contiguous():
+            query_start_loc = query_start_loc.contiguous()
+        seq_lens = seq_lens_source.to(device=block_table.device, dtype=torch.int32)
+        if not seq_lens.is_contiguous():
+            seq_lens = seq_lens.contiguous()
+        # Graph metadata is request-level while packed Q is query-token-level.
+        # Expand decode page rows to query rows without materializing KV.
+        seq_of_token = None
+        if unified:
+            query_start_loc = query_start_loc[: sequence_count + 1]
+            seq_lens = seq_lens[:sequence_count]
+            active_rows = seq_lens > 0
+            seqused_k = seq_lens
+            pages = block_table[:sequence_count, :page_count]
+            if mode == "decode" and num_actual == sequence_count:
+                seq_of_token = torch.arange(
+                    num_actual, dtype=torch.int32, device=block_table.device
+                )
+            else:
+                tokens = torch.arange(num_actual, dtype=torch.int32, device=block_table.device)
+                seq_of_token = torch.searchsorted(
+                    query_start_loc[1:], tokens, right=True
+                ).to(torch.int32)
+        elif mode == "decode":
+            query_starts = query_start_loc[: sequence_count + 1]
+            query_ends = query_starts[1:]
+            query_indices = torch.arange(
+                num_actual, dtype=torch.int32, device=block_table.device
+            )
+            request_indices = torch.searchsorted(
+                query_ends, query_indices, right=True
+            ).to(dtype=torch.long)
+            request_indices = request_indices.clamp_max(sequence_count - 1)
+            request_query_ends = query_ends.index_select(0, request_indices)
+            request_seq_lens = seq_lens.index_select(0, request_indices)
+            active_queries = query_indices < query_starts[-1]
+            seqused_k = request_seq_lens - (
+                request_query_ends - query_indices
+            ) + 1
+            seqused_k = torch.where(
+                active_queries, seqused_k, torch.ones_like(seqused_k)
+            )
+            pages = block_table.index_select(0, request_indices)[:, :page_count]
+            query_start_loc = torch.arange(
+                num_actual + 1, dtype=torch.int32, device=block_table.device
+            )
+            sequence_count = num_actual
+            max_seqlen_q = 1
+            active_rows = active_queries & (request_seq_lens > 0)
+        else:
+            query_start_loc = query_start_loc[: sequence_count + 1]
+            seq_lens = seq_lens[:sequence_count]
+            active_rows = seq_lens > 0
+            seqused_k = seq_lens
+            pages = block_table[:sequence_count, :page_count]
+        if not pages.is_contiguous():
+            pages = pages.contiguous()
+        if mode != "decode" and not unified:
+            active_rows = seqused_k > 0
+        if configured_kv_limit is not None:
+            # Zero-length rows are legal vLLM graph padding.  They must not
+            # trip the bound assertion when a dynamic decode batch shrinks.
+            torch._assert_async(
+                torch.all((seq_lens >= 0) & (seq_lens <= kernel_max_seqlen_k)),
+                "vLLM sequence length exceeds RL_KERNEL_ROCM_PAGED_KV_MAX_TOKENS",
+            )
+        pages = pages.to(dtype=torch.int32)
+        # vLLM CUDA/HIP graphs retain padded request rows after a request
+        # finishes.  Their sequence length is zero and their page-table row
+        # is not guaranteed to contain a valid physical page.  AITER CK does
+        # not accept either state; route inactive rows to page 0 and clamp
+        # their logical length. vLLM ignores outputs for graph-padding rows.
+        # CK looks up complete 128-token KV tiles before applying its logical
+        # mask. Unused columns must be valid even for active request rows.
+        # Reuse the row's first live page so masked loads see initialized KV.
+        safe_page = torch.where(active_rows, pages[:, 0], torch.zeros_like(seqused_k))
+        columns = torch.arange(page_count, dtype=torch.int32, device=pages.device)
+        live_columns = active_rows[:, None] & (
+            columns[None, :] * block_size < seqused_k[:, None]
+        )
+        pages = torch.where(live_columns, pages, safe_page[:, None])
+        tile_pages = max(1, 128 // block_size)
+        guard_columns = (-page_count) % tile_pages
+        if guard_columns:
+            pages = torch.cat((pages, safe_page[:, None].expand(-1, guard_columns)), dim=1)
+            page_count += guard_columns
+        seq_lens_for_kernel = seqused_k.clamp_min(1)
+        indptr_key = (
+            block_table.device.type,
+            block_table.device.index,
+            sequence_count,
+            page_count,
+        )
+        kv_indptr = self._rocm_kv_indptr_cache.get(indptr_key)
+        if kv_indptr is None:
+            kv_indptr = torch.arange(
+                sequence_count + 1,
+                dtype=torch.int32,
+                device=block_table.device,
+            ) * page_count
+            self._rocm_kv_indptr_cache[indptr_key] = kv_indptr
+        value = {
+            "mode": mode,
+            "sequence_count": sequence_count,
+            "page_count": page_count,
+            "pages": pages,
+            "seqused_k": seq_lens_for_kernel,
+            "cu_seqlens_q": query_start_loc,
+            "kv_indptr": kv_indptr,
+            "max_seqlen_q": max_seqlen_q,
+            "max_seqlen_k": kernel_max_seqlen_k,
+            "configured_kv_limit": configured_kv_limit,
+            "causal": causal,
+            "seq_of_token": seq_of_token,
+        }
+        self._rocm_paged_metadata_key = key
+        self._rocm_paged_metadata_owners = {owner_id}
+        self._rocm_paged_metadata_value = value
+        return value, False
+
+    def _rocm_direct_paged(
+        self,
+        impl: Any,
+        layer: Any,
+        query: torch.Tensor,
+        output: torch.Tensor,
+        attn_metadata: Any,
+        runtime: Any,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        block_table: torch.Tensor,
+        *,
+        tp_world: int,
+        num_actual: int,
+    ) -> torch.Tensor | None:
+        direct = getattr(runtime, "forward_paged_varlen_with_lse", None)
+        if not callable(direct):
+            return None
+        metadata_result = self._rocm_direct_paged_metadata(
+            attn_metadata,
+            block_table=block_table,
+            block_size=key_cache.size(1),
+            num_actual=num_actual,
+            cache_owner=layer,
+            runtime_core=getattr(runtime, "_core", None),
+        )
+        if metadata_result is None:
+            return None
+        metadata, reused = metadata_result
+        if not reused:
+            self._validate_page_bounds_once(
+                [{"pages": metadata["pages"]}],
+                num_cache_blocks=key_cache.size(0),
+            )
+        query_ready = query.narrow(0, 0, num_actual)
+        if not query_ready.is_contiguous():
+            query_ready = query_ready.contiguous()
+        output_heads = output.view(output.size(0), impl.num_heads, impl.head_size)
+        output_ready = output_heads.narrow(0, 0, num_actual)
+        result = direct(
+            query_ready,
+            key_cache,
+            value_cache,
+            page_table=metadata["pages"],
+            seqused_k=metadata["seqused_k"],
+            cu_seqlens_q=metadata["cu_seqlens_q"],
+            kv_indptr=metadata["kv_indptr"],
+            max_seqlen_q=metadata["max_seqlen_q"],
+            max_seqlen_k=metadata["max_seqlen_k"],
+            causal=metadata["causal"],
+            scale=float(impl.scale),
+            out=output_ready,
+            return_lse=False,
+            page_table_validated=True,
+        )
+        if result.out.data_ptr() != output_ready.data_ptr():
+            output_ready.copy_(result.out)
+        if num_actual < output.size(0):
+            output[num_actual:].zero_()
+        operator_provenance = _compact_attention_provenance(result.provenance)
+        projection_collective_backend = "none"
+        if tp_world > 1:
+            projection_collective_backend = "unbound"
+            if self._projection_collective_backend is not None:
+                projection_collective_backend = (
+                    self._projection_collective_backend() or "unbound"
+                )
+        self._record_phase_provenance(metadata["mode"], {
+            "framework_layout": "vllm_paged_kv",
+            "materialization": "direct_vllm_paged_kv_to_aiter_batch_prefill_ck",
+            "dense_kv_materialized": False,
+            "tp_world_size": tp_world,
+            "runtime_platform": "rocm",
+            "triton_used": True,
+            "attention_phase": metadata["mode"],
+            "sequence_count": metadata["sequence_count"],
+            "query_token_count": num_actual,
+            "max_seqlen_k": metadata["max_seqlen_k"],
+            "configured_kv_limit": metadata["configured_kv_limit"],
+            "launch_group_count": 1,
+            "metadata_source": "vllm_gpu_sequence_level",
+            "metadata_reused_across_layers": reused,
+            "deterministic_projection": _strict_attention_projection_provenance("rocm"),
+            "deterministic_all_reduce_backend": projection_collective_backend,
+            "direct_output_buffer": True,
+            "operator": operator_provenance,
+        })
+        return output
 
     def _materialization_groups(
         self,
@@ -855,6 +1622,8 @@ class VllmAttentionOperator:
         block_size: int,
         num_actual: int,
         cache_owner: Any | None = None,
+        include_host_lengths: bool = False,
+        page_bounds_epoch_factory: Callable[[], object] | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Build one paged launch from vLLM's graph-replayable GPU metadata."""
 
@@ -882,6 +1651,12 @@ class VllmAttentionOperator:
             num_actual,
             block_size,
             page_count,
+            include_host_lengths,
+            (
+                None
+                if page_bounds_epoch_factory is None
+                else id(getattr(page_bounds_epoch_factory, "__self__", page_bounds_epoch_factory))
+            ),
         )
         owner_id = id(cache_owner) if cache_owner is not None else None
         # Resolve the cross-layer cache before scheduling any GPU metadata work.
@@ -913,12 +1688,19 @@ class VllmAttentionOperator:
             seqused_k,
             torch.ones_like(seqused_k),
         )
+        cached_lengths = (
+            tuple(int(value) for value in seqused_k.tolist()) if include_host_lengths else None
+        )
 
         pages = (
             block_table.index_select(0, request_indices)[:, :page_count]
             .to(dtype=torch.int32)
             .contiguous()
         )
+        cu_seqlens_q = torch.arange(
+            num_actual + 1, dtype=torch.int32, device=query.device
+        )
+        kv_indptr = cu_seqlens_q * page_count
         groups = [
             {
                 "page_count": page_count,
@@ -928,6 +1710,12 @@ class VllmAttentionOperator:
                 "query_count": num_actual,
                 "query_contiguous": True,
                 "seqused_k": seqused_k,
+                "cached_lengths": cached_lengths,
+                "page_bounds_epoch": (
+                    None if page_bounds_epoch_factory is None else page_bounds_epoch_factory()
+                ),
+                "cu_seqlens_q": cu_seqlens_q,
+                "kv_indptr": kv_indptr,
             }
         ]
         summary = {
@@ -946,6 +1734,20 @@ class VllmAttentionOperator:
             self._metadata_cache_value = (groups, summary)
         return groups, summary
 
+    @staticmethod
+    def _validate_page_bounds_once(
+        groups: list[dict[str, Any]],
+        *,
+        num_cache_blocks: int,
+    ) -> None:
+        for group in groups:
+            pages = group["pages"]
+            bounds_ok = torch.all((pages >= 0) & (pages < num_cache_blocks))
+            if pages.is_cuda:
+                torch._assert_async(bounds_ok, "page_table entries are outside the KV cache")
+            elif not bool(bounds_ok.item()):
+                raise ValueError("page_table entries are outside the KV cache")
+
     def __call__(
         self,
         impl: Any,
@@ -959,7 +1761,6 @@ class VllmAttentionOperator:
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        del key, value
         if output_scale is not None or output_block_scale is not None:
             raise RuntimeError("strict vLLM Attention does not support quantized output")
         if attn_metadata is None:
@@ -968,15 +1769,8 @@ class VllmAttentionOperator:
             return output.zero_()
         if query.ndim != 3:
             raise RuntimeError("vLLM query must use [tokens, heads, head_dim]")
-        _require_nvidia_cuda(query, "Attention")
-        key_cache, value_cache = _vllm_kv_cache_views(
-            kv_cache,
-            head_size=int(impl.head_size),
-        )
-        if key_cache.dtype != query.dtype or value_cache.dtype != query.dtype:
-            raise RuntimeError("strict vLLM Attention requires an unquantized KV cache")
+        runtime_platform = _require_attention_accelerator(query)
 
-        block_table = self._metadata_tensor(attn_metadata, "block_table", "block_table_tensor")
         num_actual = int(getattr(attn_metadata, "num_actual_tokens", query.size(0)))
         if num_actual < 0 or num_actual > query.size(0):
             raise RuntimeError("vLLM num_actual_tokens is outside the query buffer")
@@ -989,7 +1783,6 @@ class VllmAttentionOperator:
         if output.size(0) < num_actual:
             raise RuntimeError("vLLM output buffer is smaller than num_actual_tokens")
         output_heads = output.view(output.size(0), impl.num_heads, impl.head_size)
-        block_size = key_cache.size(1)
         if self._tp_coordinates is None:
             self._tp_coordinates = _vllm_tp_coordinates()
         tp_world, tp_rank, tp_group = self._tp_coordinates
@@ -1001,7 +1794,54 @@ class VllmAttentionOperator:
                 "context_parallel_size": 1,
             },
         )
-        runtime = operator.bind_cuda_runtime()
+        runtime = operator.bind_accelerator_runtime(query)
+        page_bounds_epoch_factory: Callable[[], object] | None = None
+        if runtime_platform == "rocm":
+            candidate_factory = getattr(runtime, "new_page_bounds_epoch", None)
+            if callable(candidate_factory):
+                page_bounds_epoch_factory = candidate_factory
+        block_table = self._metadata_tensor(
+            attn_metadata, "block_table", "block_table_tensor"
+        )
+        key_cache, value_cache = _vllm_kv_cache_views(
+            kv_cache,
+            head_size=int(impl.head_size),
+            num_kv_heads=int(impl.num_kv_heads),
+            platform=runtime_platform,
+        )
+        if key_cache.dtype != query.dtype or value_cache.dtype != query.dtype:
+            raise RuntimeError("strict vLLM Attention requires an unquantized KV cache")
+        if runtime_platform == "rocm":
+            direct_output = self._rocm_direct_paged(
+                impl,
+                layer,
+                query,
+                output,
+                attn_metadata,
+                runtime,
+                key_cache,
+                value_cache,
+                block_table,
+                tp_world=tp_world,
+                num_actual=num_actual,
+            )
+            if direct_output is not None:
+                return direct_output
+            prefill_output = self._rocm_dense_prefill(
+                impl,
+                query,
+                key,
+                value,
+                output,
+                attn_metadata,
+                runtime,
+                tp_rank=tp_rank,
+                tp_world=tp_world,
+                num_actual=num_actual,
+            )
+            if prefill_output is not None:
+                return prefill_output
+        block_size = key_cache.size(1)
         groups, metadata_summary = self._materialization_groups(
             attn_metadata,
             query=query,
@@ -1009,7 +1849,17 @@ class VllmAttentionOperator:
             block_size=block_size,
             num_actual=num_actual,
             cache_owner=layer,
+            include_host_lengths=runtime_platform == "rocm",
+            page_bounds_epoch_factory=page_bounds_epoch_factory,
         )
+        page_table_validated = False
+        if runtime_platform == "rocm":
+            if not metadata_summary["metadata_reused_across_layers"]:
+                self._validate_page_bounds_once(
+                    groups,
+                    num_cache_blocks=key_cache.size(0),
+                )
+            page_table_validated = True
         last_operator_provenance: dict[str, Any] = {}
         next_query_row = 0
         for group in groups:
@@ -1025,40 +1875,75 @@ class VllmAttentionOperator:
             page_count = int(group["page_count"])
             pages = group["pages"]
             query_indices = group["query_indices"]
+            runtime_out = None
+            output_group = None
             if group["query_contiguous"]:
                 query_start = int(group["query_start"])
                 query_count = int(group["query_count"])
                 q_ready = query.narrow(0, query_start, query_count).unsqueeze(2)
+                output_group = output_heads.narrow(0, query_start, query_count)
+                runtime_out = output_group.unsqueeze(2)
             else:
                 q_ready = query.index_select(0, query_indices).unsqueeze(2).contiguous()
+            runtime_kwargs = {
+                "page_table": pages,
+                "seqused_k": group["seqused_k"],
+                "max_seqlen_k": page_count * block_size,
+                "scale": float(impl.scale),
+                "out": runtime_out,
+            }
+            if runtime_platform == "rocm":
+                runtime_kwargs["cached_lengths"] = group["cached_lengths"]
+                if group["page_bounds_epoch"] is not None:
+                    runtime_kwargs["page_bounds_epoch"] = group["page_bounds_epoch"]
+                runtime_kwargs["return_lse"] = False
+                runtime_kwargs["page_table_validated"] = page_table_validated
+                runtime_kwargs["cu_seqlens_q"] = group["cu_seqlens_q"]
+                runtime_kwargs["kv_indptr"] = group["kv_indptr"]
             result = runtime.forward_paged_with_lse(
                 q_ready,
                 key_cache,
                 value_cache,
-                page_table=pages,
-                seqused_k=group["seqused_k"],
-                max_seqlen_k=page_count * block_size,
-                scale=float(impl.scale),
+                **runtime_kwargs,
             )
             result_output = result.out.squeeze(2)
             if group["query_contiguous"]:
-                output_heads.narrow(0, int(group["query_start"]), int(group["query_count"])).copy_(
-                    result_output
-                )
+                assert output_group is not None
+                if result_output.data_ptr() != output_group.data_ptr():
+                    output_group.copy_(result_output)
             else:
                 output_heads.index_copy_(0, query_indices, result.out.squeeze(2))
             last_operator_provenance = _compact_attention_provenance(result.provenance)
-        self._last_provenance = {
+        projection_collective_backend = "none"
+        if runtime_platform == "rocm" and tp_world > 1:
+            projection_collective_backend = "unbound"
+            if self._projection_collective_backend is not None:
+                projection_collective_backend = (
+                    self._projection_collective_backend() or "unbound"
+                )
+        phase = (
+            "decode"
+            if int(getattr(attn_metadata, "num_decodes", 0)) > 0
+            else "prefill"
+        )
+        self._record_phase_provenance(phase, {
             "framework_layout": "vllm_paged_kv",
-            "materialization": "direct_paged_fa4",
+            "materialization": (
+                "direct_vllm_paged_kv_to_aiter_batch_prefill_ck"
+                if runtime_platform == "rocm"
+                else "direct_paged_fa4"
+            ),
+            "dense_kv_materialized": False,
             "tp_world_size": tp_world,
             "tp_group_bound": tp_group is not None,
-            "runtime_platform": "cuda",
-            "triton_used": False,
+            "runtime_platform": runtime_platform,
+            "triton_used": runtime_platform == "rocm",
+            "deterministic_projection": _strict_attention_projection_provenance(runtime_platform),
+            "deterministic_all_reduce_backend": projection_collective_backend,
             "direct_output_buffer": direct_output_buffer,
             **metadata_summary,
             "operator": last_operator_provenance,
-        }
+        })
         return output
 
 
@@ -1121,16 +2006,17 @@ class VllmFFNOperator:
     def _set_runtime_provenance(
         self, tp_world: int, deterministic_all_reduce_backend: str = "unbound"
     ) -> None:
+        runtime_platform = "rocm" if torch.version.hip is not None else "cuda"
         self._last_provenance = {
             "framework_layout": "vllm_tensor_parallel",
             "tp_world_size": tp_world,
-            "runtime_platform": "cuda",
-            "actual_backend": "rlkernel.cuda.det_gemm_swiglu",
+            "runtime_platform": runtime_platform,
+            "actual_backend": f"rlkernel.{runtime_platform}.det_gemm_swiglu",
             "gemm_backend": det_gemm_backend_id(),
             "fallback": False,
             "gate_up_projection": "packed_single_launch",
             "deterministic_all_reduce_backend": deterministic_all_reduce_backend,
-            "triton_used": False,
+            "triton_used": runtime_platform == "rocm",
         }
 
     def __call__(self, module: Any, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -1180,7 +2066,7 @@ class VllmFFNOperator:
 
 
 class MegatronLogpOperator:
-    """Require CUDA while reusing the structural Vime Logp provider."""
+    """Route structural Vime logp requests through the strict GPU backend."""
 
     def __init__(
         self,
@@ -1219,8 +2105,8 @@ class MegatronLogpOperator:
                 "operator": self.backend_id,
                 "actual_backend": self.backend_id,
                 "fallback": False,
-                "runtime_platform": "cuda",
-                "triton_used": False,
+                "runtime_platform": _device_name(hidden),
+                "triton_used": torch.version.hip is not None,
                 "provider": dict(getattr(result, "provenance", {})),
                 "linear_logp": dict(self._linear_logp.provenance),
                 "logits_materialized": False,
@@ -1239,8 +2125,8 @@ class MegatronLogpOperator:
             "operator": self.backend_id,
             "actual_backend": self.backend_id,
             "fallback": False,
-            "runtime_platform": "cuda",
-            "triton_used": False,
+            "runtime_platform": _device_name(logits),
+            "triton_used": torch.version.hip is not None,
             "provider": dict(getattr(result, "provenance", {})),
         }
         return result
@@ -1483,13 +2369,19 @@ class VllmLogpOperator:
                 real_vocab_size=context.real_vocab_size,
                 temperature=float(os.getenv("RL_KERNEL_VLLM_TEMPERATURE", "1.0")),
                 target="rollout",
+                diagnostics_hidden=context.hidden,
+                diagnostics_lm_head_weight=context.lm_head_weight,
             )
             strict_provenance = self._linear_logp.provenance
+            expected_entrypoint = (
+                "rocm_vocab_parallel_logp_from_local_logits_tp"
+                if torch.version.hip is not None
+                else "sm90_deterministic_logp_from_local_logits_tp"
+            )
             if (
                 strict_provenance.get("deterministic_linear_logp") is not True
                 or strict_provenance.get("actual_backend") != self._linear_logp.backend_id
-                or strict_provenance.get("strict_entrypoint")
-                != "sm90_deterministic_logp_from_local_logits_tp"
+                or strict_provenance.get("strict_entrypoint") != expected_entrypoint
             ):
                 raise RuntimeError(
                     "strict vLLM rollout linear_logp did not execute the deterministic "
@@ -1497,8 +2389,8 @@ class VllmLogpOperator:
                 )
             provenance = {
                 **dict(strict_provenance),
-                "runtime_platform": "cuda",
-                "triton_used": False,
+                "runtime_platform": _device_name(local_logits),
+                "triton_used": torch.version.hip is not None,
                 "execution": {
                     "role": "vllm_rollout_linear_logprob",
                     "strict_backend": True,
@@ -1610,8 +2502,8 @@ class VllmLogpOperator:
 
         provenance = {
             **dict(dispatch.provenance),
-            "runtime_platform": "cuda",
-            "triton_used": False,
+            "runtime_platform": _device_name(source_logits),
+            "triton_used": torch.version.hip is not None,
             "source_logits_shape": list(source_logits.shape),
             "source_logits_dtype": _dtype_name(source_logits),
             "contract_real_vocab_size": contract.sharding.real_vocab_size,

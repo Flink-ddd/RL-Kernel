@@ -19,7 +19,7 @@ _COLLECTIVE_FRAME_METADATA_BYTES = 4 * 8
 _DIRECT_STAGING_MAX_BYTES = 256 * 1024
 _REDUCTION_DTYPES = (torch.float32, torch.float16, torch.bfloat16)
 _REDUCTION_DTYPE_BYTES = {torch.float32: 4, torch.float16: 2, torch.bfloat16: 2}
-_COLLECTIVES: dict[tuple[int, int, int, int], DeterministicCollective] = {}
+_COLLECTIVES: dict[tuple[int, int, int, int], Any] = {}
 DETERMINISTIC_ALL_REDUCE_OP = "rl_kernel::deterministic_all_reduce_"
 DETERMINISTIC_STAGING_RESERVE_OP = "rl_kernel::deterministic_staging_reserve_"
 DETERMINISTIC_STAGED_ALL_REDUCE_OP = "rl_kernel::deterministic_staged_all_reduce"
@@ -31,7 +31,12 @@ def _deterministic_all_reduce_(input: torch.Tensor, collective_handle: int) -> N
 
     from rl_engine import _C
 
-    _C.deterministic_collective_all_reduce_fused(collective_handle, input, input)
+    if torch.version.hip is not None:
+        _C.deterministic_collective_rocm_ipc_all_reduce_input(
+            collective_handle, input, input
+        )
+    else:
+        _C.deterministic_collective_all_reduce_fused(collective_handle, input, input)
 
 
 @_deterministic_all_reduce_.register_fake
@@ -59,7 +64,12 @@ def _deterministic_staging_reserve_(staging: torch.Tensor, collective_handle: in
 
     from rl_engine import _C
 
-    _C.deterministic_collective_prepare_staged(collective_handle, staging)
+    if torch.version.hip is not None:
+        _C.deterministic_collective_rocm_ipc_prepare_staged(
+            collective_handle, staging
+        )
+    else:
+        _C.deterministic_collective_prepare_staged(collective_handle, staging)
 
 
 @_deterministic_staging_reserve_.register_fake
@@ -80,7 +90,12 @@ def _deterministic_staged_all_reduce(
     from rl_engine import _C
 
     output = torch.empty_like(staging)
-    _C.deterministic_collective_all_reduce_staged(collective_handle, staging, output)
+    if torch.version.hip is not None:
+        _C.deterministic_collective_rocm_ipc_all_reduce_staged(
+            collective_handle, staging, output
+        )
+    else:
+        _C.deterministic_collective_all_reduce_staged(collective_handle, staging, output)
     return output
 
 
@@ -534,14 +549,36 @@ class DeterministicCollective:
             dist.barrier(group=self.group)
 
 
+def create_deterministic_collective(
+    group: dist.ProcessGroup | None = None,
+    device: torch.device | str | int | None = None,
+    *,
+    max_size_bytes: int = _DEFAULT_MAX_SIZE_BYTES,
+) -> Any:
+    """Create the deterministic collective for the active accelerator."""
+
+    if getattr(torch.version, "hip", None) is not None:
+        return RCCLDeterministicCollective(
+            group=group,
+            device=device,
+            max_size_bytes=max_size_bytes,
+        )
+
+    return DeterministicCollective(
+        group=group,
+        device=device,
+        max_size_bytes=max_size_bytes,
+    )
+
+
 def collective_for_group(
     group: dist.ProcessGroup | None,
     *,
     min_size_bytes: int = 0,
     minimum_capacity_bytes: int = _DEFAULT_MAX_SIZE_BYTES,
     device: torch.device | str | int | None = None,
-) -> DeterministicCollective | None:
-    """Return the process-local RL-Kernel collective shared by hot-path ops."""
+) -> Any | None:
+    """Return the process-local platform collective shared by hot-path ops."""
 
     if group is None:
         return None
@@ -571,10 +608,31 @@ def collective_for_group(
     # entry. Replacing an undersized entry must not invalidate those live
     # references; normal Python ownership closes it after the last borrower.
 
-    collective = DeterministicCollective(
+    collective = create_deterministic_collective(
         group=group,
         device=device_index,
         max_size_bytes=max(minimum_capacity_bytes, min_size_bytes),
     )
     _COLLECTIVES[key] = collective
     return collective
+
+
+# Keep the public API provided by the ROCm test branch while leaving the CUDA
+# implementation above identical to PR377. The ROCm classes own no device
+# resources until constructed, so importing their definitions has no hot-path
+# or accelerator side effect.
+from rl_engine.distributed.rocm_collectives import (  # noqa: E402
+    RCCLDeterministicCollective,
+    TorchDistributedDeterministicCollective,
+)
+
+
+__all__ = [
+    "DETERMINISTIC_ALL_REDUCE_OP",
+    "DeterministicCollective",
+    "RCCLDeterministicCollective",
+    "TorchDistributedDeterministicCollective",
+    "collective_for_group",
+    "create_deterministic_collective",
+    "deterministic_all_reduce_inplace",
+]

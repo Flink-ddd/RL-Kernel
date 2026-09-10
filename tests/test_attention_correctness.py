@@ -8,6 +8,15 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from rl_engine.kernels.attention_contract import (
+    STRICT_ATTENTION_ROCM_PRODUCTION_CORE_ID,
+    STRICT_ATTENTION_ROCM_SCHEDULE_ID,
+)
+from rl_engine.kernels.ops.rocm.attention.flash_attn import (
+    StrictRocmAiterCKAttentionCore,
+    StrictRocmAttentionUnavailable,
+)
+
 try:
     from torch.nn.attention import SDPBackend, sdpa_kernel
 except ImportError:
@@ -440,3 +449,276 @@ def test_native_attention_rejects_invalid_gqa_head_ratio():
 
     with pytest.raises(ValueError, match="q heads must be divisible"):
         NativeAttentionOp()(q, k, v)
+
+
+def test_strict_rocm_aiter_ck_core_fixes_forward_and_backward_contract(monkeypatch):
+    calls = []
+
+    def fake_fwd(
+        q,
+        k,
+        v,
+        dropout_p,
+        softmax_scale,
+        causal,
+        window_left,
+        window_right,
+        sink_size,
+        return_lse,
+        return_dropout_mask,
+    ):
+        calls.append(
+            (
+                "forward",
+                dropout_p,
+                softmax_scale,
+                causal,
+                window_left,
+                window_right,
+                sink_size,
+                return_lse,
+                return_dropout_mask,
+            )
+        )
+        return (
+            q.clone(),
+            torch.zeros(q.size(0), q.size(2), q.size(1), dtype=torch.float32),
+            torch.empty(0),
+            torch.zeros(2, dtype=torch.int64),
+        )
+
+    def fake_bwd(
+        dout,
+        q,
+        k,
+        v,
+        out,
+        lse,
+        dropout_p,
+        softmax_scale,
+        causal,
+        window_left,
+        window_right,
+        deterministic,
+        **kwargs,
+    ):
+        calls.append(
+            (
+                "backward",
+                dropout_p,
+                softmax_scale,
+                causal,
+                window_left,
+                window_right,
+                deterministic,
+                kwargs["rng_state"].shape,
+            )
+        )
+        return torch.ones_like(q), torch.ones_like(k), torch.ones_like(v), torch.empty(0)
+
+    core = StrictRocmAiterCKAttentionCore(
+        _mha_fwd=fake_fwd,
+        _mha_bwd=fake_bwd,
+        _source_sha256="a" * 64,
+    )
+    monkeypatch.setattr(core, "_validate_inputs", lambda *_args: None)
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda _device: type("Props", (), {"name": "test-gpu", "gcnArchName": "gfx-test"})(),
+    )
+    q = torch.randn(1, 4, 2, 8, dtype=torch.bfloat16, requires_grad=True)
+    k = torch.randn(1, 2, 3, 8, dtype=torch.bfloat16, requires_grad=True)
+    v = torch.randn(1, 2, 3, 8, dtype=torch.bfloat16, requires_grad=True)
+    result = core.forward_with_lse(
+        q,
+        k,
+        v,
+        causal=True,
+        scale=0.125,
+        query_position_ids=torch.tensor([[1, 2]]),
+        key_position_ids=torch.tensor([[0, 1, 2]]),
+    )
+    result.out.float().sum().backward()
+
+    assert calls == [
+        ("forward", 0.0, 0.125, True, -1, -1, 0, True, False),
+        ("backward", 0.0, 0.125, True, -1, -1, True, torch.Size([2])),
+    ]
+    assert result.out.shape == q.shape
+    assert result.lse.shape == q.shape[:3]
+    assert result.lse.dtype is torch.float32
+    assert result.provenance["strict_core_id"] == STRICT_ATTENTION_ROCM_PRODUCTION_CORE_ID
+    assert result.provenance["strict_schedule"] == STRICT_ATTENTION_ROCM_SCHEDULE_ID
+    assert result.provenance["attention_backend"] == "aiter.rocm.ck_dense_mha"
+    assert result.provenance["split_kv_control"] == "dense_non_split_api"
+    assert result.provenance["num_splits"] == 1
+    assert result.provenance["deterministic_backward"] is True
+    assert result.provenance["aiter_source_sha256"] == "a" * 64
+    assert q.grad is not None and k.grad is not None and v.grad is not None
+
+
+def test_strict_rocm_aiter_ck_direct_decode_uses_callers_output(monkeypatch):
+    seen_out = None
+
+    def fake_fwd(q, k, v, *_args, out=None):
+        nonlocal seen_out
+        seen_out = out
+        out.copy_(q)
+        return (
+            out,
+            torch.zeros(q.size(0), q.size(2), q.size(1), dtype=torch.float32),
+            torch.empty(0),
+            torch.zeros(2, dtype=torch.int64),
+        )
+
+    core = StrictRocmAiterCKAttentionCore(
+        _mha_fwd=fake_fwd,
+        _mha_bwd=lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(core, "_validate_inputs", lambda *_args: None)
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda _device: type("Props", (), {"name": "test-gpu", "gcnArchName": "gfx-test"})(),
+    )
+    q = torch.randn(1, 4, 1, 8, dtype=torch.bfloat16)
+    k = torch.randn(1, 1, 7, 8, dtype=torch.bfloat16)
+    v = torch.randn_like(k)
+    out = torch.empty_like(q)
+
+    with torch.no_grad():
+        result = core.forward_decode_with_lse_into(q, k, v, out=out, scale=0.125)
+
+    assert seen_out is not None and seen_out.data_ptr() == out.data_ptr()
+    assert result.out is out
+    assert torch.equal(out, q)
+    assert result.provenance["core_output_staging"] == "aiter_direct_caller_group"
+
+
+def test_strict_rocm_aiter_ck_reuses_immutable_provenance_inputs(monkeypatch):
+    def fake_fwd(q, k, v, *_args, out=None):
+        out.copy_(q)
+        return (
+            out,
+            torch.zeros(q.size(0), q.size(2), q.size(1), dtype=torch.float32),
+            torch.empty(0),
+            torch.zeros(2, dtype=torch.int64),
+        )
+
+    core = StrictRocmAiterCKAttentionCore(
+        _mha_fwd=fake_fwd,
+        _mha_bwd=lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(core, "_validate_inputs", lambda *_args: None)
+    device_lookups = 0
+
+    def fake_device_properties(_device):
+        nonlocal device_lookups
+        device_lookups += 1
+        return type("Props", (), {"name": "test-gpu", "gcnArchName": "gfx-test"})()
+
+    monkeypatch.setattr(torch.cuda, "get_device_properties", fake_device_properties)
+    split_resolves = 0
+    split_type = type(core.split_kv)
+    original_resolve = split_type.resolve
+
+    def counted_resolve(self, total_kv_tokens, *, backend):
+        nonlocal split_resolves
+        split_resolves += 1
+        return original_resolve(self, total_kv_tokens, backend=backend)
+
+    monkeypatch.setattr(split_type, "resolve", counted_resolve)
+    q = torch.randn(1, 4, 1, 8, dtype=torch.bfloat16)
+
+    def run(kv_tokens):
+        k = torch.randn(1, 1, kv_tokens, 8, dtype=torch.bfloat16)
+        with torch.no_grad():
+            return core.forward_decode_with_lse_into(q, k, k.clone(), out=torch.empty_like(q))
+
+    first = run(7)
+    repeated = run(7)
+    changed_length = run(9)
+    restored_length = run(7)
+
+    assert device_lookups == 1
+    assert split_resolves == 3
+    assert first.provenance == repeated.provenance
+    assert first.provenance is not repeated.provenance
+    assert first.provenance["split_kv"] is not repeated.provenance["split_kv"]
+    first_boundaries = first.provenance["split_kv"]["actual_split_boundaries"]
+    repeated_boundaries = repeated.provenance["split_kv"]["actual_split_boundaries"]
+    assert first_boundaries is not repeated_boundaries
+    assert first_boundaries[0] is not repeated_boundaries[0]
+    assert changed_length.provenance["split_kv"]["actual_split_boundaries"] == [[0, 9]]
+    assert restored_length.provenance["split_kv"]["actual_split_boundaries"] == [[0, 7]]
+    first_boundaries[0][0] = 3
+    assert repeated_boundaries == [[0, 7]]
+    after_mutation = run(7)
+    assert after_mutation.provenance["split_kv"]["actual_split_boundaries"] == [[0, 7]]
+    assert split_resolves == 3
+
+    assert core._device_description(torch.device("cuda:1")) == ("test-gpu", "gfx-test")
+    assert core._device_description(torch.device("cuda:1")) == ("test-gpu", "gfx-test")
+    assert device_lookups == 2
+
+
+def test_strict_rocm_aiter_ck_direct_decode_rejects_ignored_output(monkeypatch):
+    def fake_fwd(q, k, v, *_args, out=None):
+        return (
+            q.clone(),
+            torch.zeros(q.size(0), q.size(2), q.size(1), dtype=torch.float32),
+            torch.empty(0),
+            torch.zeros(2, dtype=torch.int64),
+        )
+
+    core = StrictRocmAiterCKAttentionCore(
+        _mha_fwd=fake_fwd,
+        _mha_bwd=lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(core, "_validate_inputs", lambda *_args: None)
+    q = torch.randn(1, 4, 1, 8, dtype=torch.bfloat16)
+    k = torch.randn(1, 1, 7, 8, dtype=torch.bfloat16)
+    out = torch.empty_like(q)
+
+    with (
+        torch.no_grad(),
+        pytest.raises(
+            StrictRocmAttentionUnavailable,
+            match="requested output buffer",
+        ),
+    ):
+        core.forward_decode_with_lse_into(q, k, k, out=out)
+
+
+def test_strict_rocm_aiter_ck_core_rejects_non_fp32_lse(monkeypatch):
+    def fake_fwd(q, k, v, *_args):
+        return (
+            q,
+            torch.zeros(q.size(0), q.size(2), q.size(1), dtype=q.dtype),
+            torch.empty(0),
+            torch.empty(2),
+        )
+
+    core = StrictRocmAiterCKAttentionCore(
+        _mha_fwd=fake_fwd,
+        _mha_bwd=lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(core, "_validate_inputs", lambda *_args: None)
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda _device: type("Props", (), {"name": "test-gpu", "gcnArchName": "gfx-test"})(),
+    )
+    q = torch.randn(1, 4, 1, 8, dtype=torch.bfloat16)
+    k = torch.randn(1, 2, 1, 8, dtype=torch.bfloat16)
+
+    with pytest.raises(StrictRocmAttentionUnavailable, match="FP32 LSE"):
+        core.forward_with_lse(
+            q,
+            k,
+            k,
+            causal=True,
+            query_position_ids=torch.tensor([[0]]),
+            key_position_ids=torch.tensor([[0]]),
+        )

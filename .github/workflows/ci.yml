@@ -89,6 +89,8 @@ jobs:
             tests/test_attention_cross_config_binding.py \
             tests/test_attention_preprocess.py \
             tests/test_attention_projection.py \
+            tests/test_framework_runtime_adapters.py \
+            tests/test_rocm_e2e_ablation.py \
             tests/test_cp_attention.py \
             tests/test_cp_attention_transformer_engine.py
 
@@ -100,7 +102,11 @@ jobs:
         run: python -m pytest tests/test_attention_contract.py -v
 
       - name: Run WS2 Logprob Contract Tests (CPU-safe)
-        run: python -m pytest tests/test_logprob_contract.py -v
+        run: |
+          python -m pytest \
+            tests/test_logprob_contract.py \
+            tests/test_rocm_lm_head_weight_cache.py \
+            -v
 
       - name: Run WS2 Vocab-Parallel Logprob Tests (CPU-safe)
         run: python -m pytest tests/test_vocab_parallel_logp.py -v

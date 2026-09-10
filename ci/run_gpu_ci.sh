@@ -56,7 +56,7 @@ CREATE_OUT=$(runpodctl pod create \
   --cloud-type SECURE \
   --ports "22/tcp" 2>&1)
 
-# Fallback 触发
+# Trigger fallback when the requested GPU instances are unavailable.
 if echo "$CREATE_OUT" | grep -qi "no longer any instances available"; then
   echo "[ci] WARN: ${GPU_COUNT}x ${GPU_ID} sold out! Triggering elastic Fallback..."
 
