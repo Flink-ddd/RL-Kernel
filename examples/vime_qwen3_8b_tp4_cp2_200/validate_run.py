@@ -21,7 +21,7 @@ from rl_engine.integrations.runtime import _contains_triton, _runtime_platform
 RECORD_RE = re.compile(r"\b(rollout|step|perf)\s+(\d+):\s+(\{.*\})\s*$")
 FRAMEWORKS = (("megatron", "training"), ("vllm", "rollout"))
 MODULES = ("attention", "ffn", "logp")
-EXPECTED_TOPOLOGY = {
+EXPECTED_FIXED_TOPOLOGY = {
     "gpus": 8,
     "actor_gpus": 8,
     "rollout_gpus": 8,
@@ -31,8 +31,6 @@ EXPECTED_TOPOLOGY = {
     "colocate": True,
     "offload_train": False,
     "offload_rollout": True,
-    "rollout_gpus_per_engine": 4,
-    "rollout_engines": 2,
 }
 CASE_FIELDS = {
     "attention": "attention_case",
@@ -50,6 +48,40 @@ CUDA_GRAPH_LAUNCHER_MARKERS = (
     "required vLLM full-decode CUDA Graph capture sizes",
     "strict vLLM full-decode CUDA Graph capture sizes",
 )
+
+
+def _validate_topology(value: Any) -> list[str]:
+    if not isinstance(value, Mapping):
+        return ["manifest does not contain the required TP4/CP2 colocated topology"]
+    errors = [
+        f"manifest topology {key}={value.get(key)!r}, expected {expected!r}"
+        for key, expected in EXPECTED_FIXED_TOPOLOGY.items()
+        if value.get(key) != expected
+    ]
+    rollout_gpus = value.get("rollout_gpus")
+    rollout_gpus_per_engine = value.get("rollout_gpus_per_engine")
+    rollout_cp = value.get("rollout_cp", 1)
+    rollout_tp = value.get("rollout_tp", rollout_gpus_per_engine)
+    rollout_engines = value.get("rollout_engines")
+    if (
+        not isinstance(rollout_gpus, int)
+        or not isinstance(rollout_tp, int)
+        or not isinstance(rollout_cp, int)
+        or not isinstance(rollout_gpus_per_engine, int)
+        or rollout_tp <= 0
+        or rollout_cp <= 0
+        or rollout_gpus_per_engine != rollout_tp * rollout_cp
+        or rollout_gpus % rollout_gpus_per_engine
+    ):
+        errors.append(
+            "manifest rollout_gpus_per_engine must equal rollout_tp * rollout_cp "
+            "and divide rollout_gpus"
+        )
+    elif rollout_engines != rollout_gpus // rollout_gpus_per_engine:
+        errors.append(
+            "manifest rollout_engines does not match " "rollout_gpus // rollout_gpus_per_engine"
+        )
+    return errors
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -399,15 +431,26 @@ def validate_run(run_dir: Path) -> dict[str, Any]:
         for index in range(max(0, len(train_command) - 1))
     ):
         global_errors.append("train command does not explicitly select GRPO")
-    if manifest.get("topology") != EXPECTED_TOPOLOGY:
-        global_errors.append("manifest does not contain the required TP4/CP2 colocated topology")
-    required_command_pairs = (
+    topology = manifest.get("topology")
+    global_errors.extend(_validate_topology(topology))
+    topology = topology if isinstance(topology, Mapping) else {}
+    required_command_pairs = [
         ("--actor-num-gpus-per-node", "8"),
         ("--rollout-num-gpus", "8"),
         ("--tensor-model-parallel-size", "4"),
         ("--context-parallel-size", "2"),
-        ("--rollout-num-gpus-per-engine", "4"),
-    )
+        (
+            "--rollout-num-gpus-per-engine",
+            str(topology.get("rollout_gpus_per_engine", "")),
+        ),
+    ]
+    if "rollout_cp" in topology:
+        required_command_pairs.append(
+            (
+                "--vllm-prefill-context-parallel-size",
+                str(topology["rollout_cp"]),
+            )
+        )
     if isinstance(train_command, list):
         for flag, value in required_command_pairs:
             if not any(

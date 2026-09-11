@@ -11,13 +11,16 @@ from examples.vime_qwen3_8b_tp4_cp2_200.run_arm import (
     MEGATRON_ATTENTION_BACKEND,
     RL_KERNEL_LINEAR_LOGP_PROVIDER,
     _linear_logp_provider_args,
+    _max_engine_decode_batch,
     _mismatch_metrics_args,
+    _rollout_topology,
 )
 from examples.vime_qwen3_8b_tp4_cp2_200.run_supplement_suite import specs
 from examples.vime_qwen3_8b_tp4_cp2_200.validate_run import (
     RL_KERNEL_MISMATCH_SIDECAR_MARKER,
     VIME_NATIVE_LINEAR_LOGP_MARKER,
     _validate_readbacks,
+    _validate_topology,
 )
 
 
@@ -62,6 +65,41 @@ def _production_readbacks() -> list[dict]:
 
 def test_tp4_formal_matrix_pins_the_vime_qwen3_attention_backend():
     assert MEGATRON_ATTENTION_BACKEND == "fused"
+
+
+def test_rollout_tp_cp_derive_router_engines_and_graph_batch():
+    expected = {
+        (2, 1): (2, 4, 2),
+        (2, 2): (4, 2, 4),
+        (4, 1): (4, 2, 4),
+        (4, 2): (8, 1, 8),
+        (8, 1): (8, 1, 8),
+    }
+    for (rollout_tp, rollout_cp), (
+        gpus_per_engine,
+        engines,
+        graph_batch,
+    ) in expected.items():
+        topology = _rollout_topology(rollout_tp, rollout_cp)
+        assert topology["rollout_tp"] == rollout_tp
+        assert topology["rollout_cp"] == rollout_cp
+        assert topology["rollout_gpus_per_engine"] == gpus_per_engine
+        assert topology["rollout_engines"] == engines
+        assert (
+            _max_engine_decode_batch(
+                1,
+                8,
+                "round_robin",
+                int(topology["rollout_engines"]),
+            )
+            == graph_batch
+        )
+        assert _validate_topology(topology) == []
+
+    legacy_topology = _rollout_topology(4, 1)
+    legacy_topology.pop("rollout_tp")
+    legacy_topology.pop("rollout_cp")
+    assert _validate_topology(legacy_topology) == []
 
 
 def test_launcher_forces_cuda_graph_without_a_logp_provider():
