@@ -71,6 +71,9 @@ TOPOLOGY = {
 # backend auto-selection.
 MEGATRON_ATTENTION_BACKEND = "fused"
 RL_KERNEL_LINEAR_LOGP_PROVIDER = "rl_engine.integrations.vime.linear_logp_provider.provider"
+RL_KERNEL_MISMATCH_METRICS_HOOK = (
+    "examples.vime_rocm_attention_ablation.tis_metrics.metrics_only_tis"
+)
 
 MODEL_ARGS = (
     "--swiglu",
@@ -133,6 +136,14 @@ def _linear_logp_provider_args(arm: Arm) -> tuple[str, ...]:
             "strict",
         )
     raise ValueError(f"unsupported training logp route: {arm.logp_case!r}")
+
+
+def _mismatch_metrics_args() -> tuple[str, ...]:
+    return (
+        "--get-mismatch-metrics",
+        "--custom-tis-function-path",
+        RL_KERNEL_MISMATCH_METRICS_HOOK,
+    )
 
 
 def _path(value: str | None, label: str) -> Path:
@@ -346,6 +357,7 @@ def main(argv: list[str] | None = None) -> int:
         "RL_KERNEL_FFN_CASE": arm.ffn_case,
         "RL_KERNEL_LOGP_CASE": arm.logp_case,
         "RL_KERNEL_READBACK_DIR": str(run_dir / "readbacks"),
+        "RL_KERNEL_MISMATCH_SIDECAR_DIR": str(run_dir / "mismatch-sidecars"),
         "RL_KERNEL_VLLM_REAL_VOCAB_SIZE": "151936",
         "RL_KERNEL_VLLM_PADDED_VOCAB_SIZE": "152064",
         "RL_KERNEL_VLLM_TEMPERATURE": "1.0",
@@ -456,6 +468,7 @@ def main(argv: list[str] | None = None) -> int:
         str(TOPOLOGY["rollout_gpus_per_engine"]),
         "--vllm-gpu-memory-utilization",
         str(args.vllm_gpu_memory_utilization),
+        *_mismatch_metrics_args(),
     ]
     if arm.framework_use_rollout_logprobs:
         train_command.append("--use-rollout-logprobs")
