@@ -53,11 +53,15 @@ if [[ "${RL_KERNEL_ATTENTION_CASE:-}" != "${RLK_ABLATION_CASE_ID}" ]]; then
   echo "RL_KERNEL_ATTENTION_CASE disagrees with the arm ID" >&2
   exit 2
 fi
-if [[ "${RL_KERNEL_FFN_CASE:-}" != "${RL_KERNEL_LOGP_CASE:-}" ]] ||
-   [[ "${RL_KERNEL_FFN_CASE:-}" != "R/R" && "${RL_KERNEL_FFN_CASE:-}" != "P/P" ]]; then
-  echo "FFN and Logp must both use P/P or both use R/R" >&2
-  exit 2
-fi
+for module_case in "${RL_KERNEL_FFN_CASE:-}" "${RL_KERNEL_LOGP_CASE:-}"; do
+  case "${module_case}" in
+    P/P|R/R) ;;
+    *)
+      echo "FFN and Logp cases must each be P/P or R/R" >&2
+      exit 2
+      ;;
+  esac
+done
 if [[ "${RL_KERNEL_VLLM_INTEGRATION:-}" != "1" ]]; then
   echo "RL_KERNEL_VLLM_INTEGRATION=1 is required for rollout route readback" >&2
   exit 2

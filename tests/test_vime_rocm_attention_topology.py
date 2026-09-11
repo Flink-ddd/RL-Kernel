@@ -124,5 +124,7 @@ def test_launcher_uses_pr377_torch_dist_actor_load_without_reference_model():
     assert "--linear-logp-provider" in launcher
     assert "rl_engine.integrations.vime.linear_logp_provider.provider" in launcher
     assert "--linear-logp-provider-mode strict" in launcher
-    assert '"${RL_KERNEL_FFN_CASE:-}" != "R/R"' in launcher
-    assert '"${RL_KERNEL_LOGP_CASE:-}" != "R/R"' in launcher
+    assert (
+        'for module_case in "${RL_KERNEL_FFN_CASE:-}" ' '"${RL_KERNEL_LOGP_CASE:-}"; do'
+    ) in launcher
+    assert "FFN and Logp cases must each be P/P or R/R" in launcher
