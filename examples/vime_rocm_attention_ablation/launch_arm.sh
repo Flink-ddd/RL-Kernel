@@ -282,6 +282,14 @@ ROLLOUT_LOGPROBS_ARGS=()
 if [[ "${RLK_ABLATION_USE_ROLLOUT_LOGPROBS:-0}" == "1" ]]; then
   ROLLOUT_LOGPROBS_ARGS+=(--use-rollout-logprobs)
 fi
+REFERENCE_MODEL_ARGS=()
+if [[ "${RLK_ABLATION_USE_KL_LOSS:-0}" == "1" ]]; then
+  : "${RLK_ABLATION_KL_LOSS_COEF:?}"
+  REFERENCE_MODEL_ARGS+=(
+    --use-kl-loss
+    --kl-loss-coef "${RLK_ABLATION_KL_LOSS_COEF}"
+  )
+fi
 ray job submit \
   --address="${ray_job_address}" \
   --runtime-env-json="${RUNTIME_ENV_JSON}" \
@@ -297,6 +305,7 @@ ray job submit \
   "${MODEL_ARGS[@]}" \
   --hf-checkpoint "${RLK_ABLATION_MODEL_ROOT}" \
   --ref-load "${RLK_ABLATION_REFERENCE_CHECKPOINT}" \
+  "${REFERENCE_MODEL_ARGS[@]}" \
   --load "${RLK_ABLATION_REFERENCE_CHECKPOINT}" \
   --start-rollout-id 0 \
   "${SAVE_ARGS[@]}" \
