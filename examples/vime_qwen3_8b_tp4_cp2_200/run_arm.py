@@ -71,9 +71,7 @@ TOPOLOGY = {
 # backend auto-selection.
 MEGATRON_ATTENTION_BACKEND = "fused"
 RL_KERNEL_LINEAR_LOGP_PROVIDER = "rl_engine.integrations.vime.linear_logp_provider.provider"
-RL_KERNEL_MISMATCH_METRICS_HOOK = (
-    "examples.vime_rocm_attention_ablation.tis_metrics.metrics_only_tis"
-)
+RL_KERNEL_MISMATCH_METRICS_HOOK = "vime_rocm_attention_ablation.tis_metrics.metrics_only_tis"
 
 MODEL_ARGS = (
     "--swiglu",
@@ -329,7 +327,12 @@ def main(argv: list[str] | None = None) -> int:
     run_dir = args.output_root.expanduser().resolve() / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
 
-    pythonpath = [str(rl_kernel_root), str(vime_root), str(megatron_root)]
+    pythonpath = [
+        str(rl_kernel_root / "examples"),
+        str(rl_kernel_root),
+        str(vime_root),
+        str(megatron_root),
+    ]
     pythonpath.extend(str(Path(item).expanduser().resolve()) for item in args.extra_pythonpath)
     if os.environ.get("PYTHONPATH"):
         pythonpath.extend(item for item in os.environ["PYTHONPATH"].split(os.pathsep) if item)

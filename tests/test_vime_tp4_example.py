@@ -153,7 +153,7 @@ def test_module_ablation_enables_rlkernel_mismatch_sidecars():
     assert _mismatch_metrics_args() == (
         "--get-mismatch-metrics",
         "--custom-tis-function-path",
-        "examples.vime_rocm_attention_ablation.tis_metrics.metrics_only_tis",
+        "vime_rocm_attention_ablation.tis_metrics.metrics_only_tis",
     )
 
 

@@ -66,7 +66,12 @@ def _compare_mismatch_sidecars(
     tensor_parallel_size: int,
     context_parallel_size: int,
 ) -> dict[str, Any]:
-    from examples.vime_rocm_attention_ablation.validate_artifacts import compare_train_rollout_logps
+    import sys
+
+    examples_root = Path(__file__).resolve().parents[1]
+    if str(examples_root) not in sys.path:
+        sys.path.insert(0, str(examples_root))
+    from vime_rocm_attention_ablation.validate_artifacts import compare_train_rollout_logps
 
     return compare_train_rollout_logps(
         directory,
