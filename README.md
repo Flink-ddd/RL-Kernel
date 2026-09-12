@@ -10,6 +10,7 @@
 
 <p align="center">
   <a href="https://rl-align.github.io/RL-Kernel/"><img src="https://img.shields.io/badge/Documentation-Docs-2ea44f" alt="Documentation"></a>
+  <a href="https://rlalign.ai"><img src="https://img.shields.io/badge/Website-rlalign.ai-FF844B?logo=googlechrome&logoColor=white" alt="RL-Align website"></a>
   <a href="https://rl-align.slack.com/join/shared_invite/zt-46bxj7uyt-gEK3xzwSJr_lppJsZolR~g#/shared-invite/email"><img src="https://img.shields.io/badge/Slack-Join%20Us-4A154B" alt="Slack"></a>
   <a href="https://www.linkedin.com/company/rl-align"><img src="https://img.shields.io/badge/LinkedIn-Follow-0A66C2?logo=linkedin&logoColor=white" alt="Follow RL-Align on LinkedIn"></a>
   <a href="https://x.com/RLKernel"><img src="https://img.shields.io/badge/X-Follow-000000?logo=x&logoColor=white" alt="Follow RL-Kernel on X"></a>
