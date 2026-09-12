@@ -118,8 +118,8 @@ git clone https://github.com/RL-Align/RL-Kernel.git
 cd RL-Kernel
 ```
 
-For the Qwen3-8B train–rollout command and setup for vime with RL-Kernel, see the
-[8×H100 integration runbook](https://github.com/RL-Align/RL-Kernel/blob/main/examples/vime_qwen3_8b_tp4_cp2_200/REPRODUCTION.md).
+For the Qwen3-8B train–rollout commands and setup for vime with RL-Kernel on CUDA and
+ROCm, see the [reproduction scripts](https://github.com/RL-Align/RL-Kernel/blob/main/examples/vime_qwen3_8b_tp4_cp2_200/REPRODUCTION.md).
 
 ### NVIDIA CUDA
 
