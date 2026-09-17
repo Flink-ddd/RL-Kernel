@@ -152,6 +152,42 @@ def test_provider_structural_path_returns_linear_logp_result(monkeypatch):
     assert result.provenance["execution"]["role"] == "vime_training_linear_logp"
 
 
+@pytest.mark.parametrize(
+    ("logits_are_temperature_scaled", "expected_temperature"),
+    ((True, None), (False, 0.7)),
+)
+def test_provider_scales_reused_local_logits_at_most_once(
+    monkeypatch, logits_are_temperature_scaled, expected_temperature
+):
+    monkeypatch.setenv("VIME_RL_KERNEL_STRICT", "1")
+    observed = {}
+
+    class FakeLinearLogp:
+        backend_id = "fake-linear-logp"
+        provenance = {"actual_backend": "fake-linear-logp"}
+
+        def from_local_logits(self, local_logits, target_ids, **kwargs):
+            observed["temperature"] = kwargs["temperature"]
+            return torch.log_softmax(local_logits[:, :7], dim=-1)[
+                torch.arange(target_ids.size(0)), target_ids
+            ]
+
+    import rl_engine.integrations.vime.linear_logp_provider as provider_module
+
+    monkeypatch.setattr(provider_module.torch.version, "hip", "6.0")
+    monkeypatch.setattr(
+        provider_module, "_default_strict_linear_logp", lambda: FakeLinearLogp()
+    )
+    request = _structural_request()
+    request.temperature = 0.7
+    request.metadata["logits_are_temperature_scaled"] = logits_are_temperature_scaled
+
+    result = provider(request)
+
+    assert result.logp.shape == (3, 1)
+    assert observed["temperature"] == expected_temperature
+
+
 def test_megatron_adapter_forwards_structured_context(monkeypatch):
     request = _structural_request()
     observed = {}

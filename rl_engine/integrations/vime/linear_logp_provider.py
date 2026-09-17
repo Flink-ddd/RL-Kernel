@@ -220,6 +220,14 @@ def _is_identity_temperature(value: Any) -> bool:
     return value is None or (not isinstance(value, torch.Tensor) and float(value) == 1.0)
 
 
+def _local_logits_temperature(request: Any) -> Any:
+    """Return scaling still required for logits supplied by Vime."""
+
+    if _metadata(request).get("logits_are_temperature_scaled") is True:
+        return None
+    return getattr(request, "temperature", None)
+
+
 @torch.no_grad()
 def _metric_entropy_from_strict_lse(
     local_logits: torch.Tensor,
@@ -299,11 +307,12 @@ def _provider_impl(request: Any, *, linear_logp: Any = None) -> LinearLogpResult
             reuse_local_logits = True
         with_entropy = bool(getattr(request, "with_entropy", False))
         with_entropy_grad = bool(getattr(request, "with_entropy_grad", False))
+        local_logits_temperature = _local_logits_temperature(request)
         fast_metric_entropy = (
             reuse_local_logits
             and with_entropy
             and not with_entropy_grad
-            and _is_identity_temperature(getattr(request, "temperature", None))
+            and _is_identity_temperature(local_logits_temperature)
         )
         strict_lse = None
         if reuse_local_logits:
@@ -325,7 +334,7 @@ def _provider_impl(request: Any, *, linear_logp: Any = None) -> LinearLogpResult
                 global_vocab_size=int(partition.padded_size),
                 real_vocab_size=int(partition.real_size),
                 target="training",
-                temperature=getattr(request, "temperature", None),
+                temperature=local_logits_temperature,
                 return_lse=fast_metric_entropy,
                 diagnostics_hidden=hidden,
                 diagnostics_lm_head_weight=projection.weight,
