@@ -95,9 +95,9 @@ def relative(pp, rr, direction):
         return "n/a"
     if direction == "lower":
         delta = (rr - pp) / pp
-        return f"快 {-delta * 100:.2f}%" if delta < 0 else f"慢 {delta * 100:.2f}%"
+        return f"{-delta * 100:.2f}% faster" if delta < 0 else f"{delta * 100:.2f}% slower"
     delta = (rr - pp) / pp
-    return f"高 {delta * 100:.2f}%" if delta > 0 else f"低 {-delta * 100:.2f}%"
+    return f"{delta * 100:.2f}% higher" if delta > 0 else f"{-delta * 100:.2f}% lower"
 
 
 def render(pp_dir: Path, rr_dir: Path) -> str:
@@ -107,10 +107,10 @@ def render(pp_dir: Path, rr_dir: Path) -> str:
     rr_info = load_metrics(rr_dir)
     n_pp, n_rr = len(pp_rounds), len(rr_rounds)
     lines = []
-    lines.append(f"## {min(n_pp, n_rr)} 轮一致性结果\n")
-    lines.append("| 配置 | Mismatch Count | Max \\|Δlogp\\| | torch.equal |")
+    lines.append(f"## Consistency results over {min(n_pp, n_rr)} rounds\n")
+    lines.append("| Configuration | Mismatch Count | Max \\|Δlogp\\| | torch.equal |")
     lines.append("|---|---:|---:|:---:|")
-    for label, info in (("P/P 原生", pp_info), ("R/R 严格", rr_info)):
+    for label, info in (("P/P native", pp_info), ("R/R strict", rr_info)):
         m = info["metrics"]
         mismatch = _metric(m, "mismatch_count", "mismatched_tokens", "mismatch_tokens")
         total = _metric(m, "element_count", "token_count", "compared_tokens", "total_tokens")
@@ -122,9 +122,9 @@ def render(pp_dir: Path, rr_dir: Path) -> str:
             f"{str(equal).lower()} |"
         )
     lines.append("")
-    lines.append(f"## {min(n_pp, n_rr)} 轮平均性能结果\n")
+    lines.append(f"## Average performance over {min(n_pp, n_rr)} rounds\n")
     lines.append(f"(P/P rounds={n_pp}, R/R rounds={n_rr})\n")
-    lines.append("| 指标 | P/P 原生 | R/R 严格 | R/R 相对 P/P |")
+    lines.append("| Metric | P/P native | R/R strict | R/R relative to P/P |")
     lines.append("|---|---:|---:|---:|")
     keys = [row[1] for row in ROWS]
     pp_mean = mean_rows(pp_rounds, keys)
@@ -138,7 +138,7 @@ def render(pp_dir: Path, rr_dir: Path) -> str:
             f"{relative(pp_value, rr_value, direction)} |"
         )
     lines.append("")
-    lines.append("### 每轮明细\n")
+    lines.append("### Per-round details\n")
     lines.append(
         "| round | P/P rollout | R/R rollout | P/P actor train | R/R actor train "
         "| P/P step | R/R step |"

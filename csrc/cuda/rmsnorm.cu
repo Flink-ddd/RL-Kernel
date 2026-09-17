@@ -120,13 +120,13 @@ __global__ void rmsnorm_fwd_kernel(
 
     float local_sum = 0.0f;
 
-    // 计算 sum(x^2)，每个 thread 负责若干列。
+    // Compute sum(x^2), with each thread handling a subset of columns.
     for (int col = tid; col < H; col += blockDim.x) {
         float xv = load_as_float<scalar_t>(x_row + col);
         local_sum += xv * xv;
     }
 
-    // 固定 block reduction。
+    // Reduce within the block in a fixed order.
     float sum = block_reduce_sum(local_sum);
 
     float row_rstd = rsqrtf(sum / static_cast<float>(H) + eps);
@@ -137,7 +137,7 @@ __global__ void rmsnorm_fwd_kernel(
 
     __syncthreads();
 
-    // 写出 y = x * rstd * weight。
+    // Write y = x * rstd * weight.
     for (int col = tid; col < H; col += blockDim.x) {
         float xv = load_as_float<scalar_t>(x_row + col);
         float wv = load_as_float<weight_t>(weight + col);
