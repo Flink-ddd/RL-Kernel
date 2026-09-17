@@ -2377,47 +2377,48 @@ class VllmLogpOperator:
                     raise RuntimeError(
                         "vLLM top-p replay rows are not aligned with strict local logits"
                     )
-                vocab_start = int(context.vocab_start_index)
-                vocab_end = vocab_start + int(local_logits.size(1))
-                local_keep = torch.zeros_like(local_logits, dtype=torch.bool)
-                valid = (
-                    torch.isfinite(replay_values)
-                    & (replay_ids >= vocab_start)
-                    & (replay_ids < vocab_end)
-                )
-                replay_rows = (
-                    torch.arange(replay_ids.size(0), device=replay_ids.device)
-                    .unsqueeze(1)
-                    .expand_as(replay_ids)
-                )
-                local_keep[
-                    replay_rows[valid],
-                    replay_ids[valid].to(torch.long) - vocab_start,
-                ] = True
-                local_logits = local_logits.masked_fill(~local_keep, float("-inf"))
                 top_p_replay = True
-            selected = self._linear_logp.from_local_logits(
-                local_logits,
-                token_ids,
-                tp_group=context.tp_group,
-                vocab_start_index=context.vocab_start_index,
-                global_vocab_size=context.global_vocab_size,
-                real_vocab_size=context.real_vocab_size,
-                temperature=float(os.getenv("RL_KERNEL_VLLM_TEMPERATURE", "1.0")),
-                target="rollout",
-                diagnostics_hidden=context.hidden,
-                diagnostics_lm_head_weight=context.lm_head_weight,
-            )
+            if top_p_replay:
+                selected = self._linear_logp.from_local_logits_top_p(
+                    local_logits,
+                    token_ids,
+                    replay_ids,
+                    replay_values,
+                    tp_group=context.tp_group,
+                    vocab_start_index=context.vocab_start_index,
+                    global_vocab_size=context.global_vocab_size,
+                    real_vocab_size=context.real_vocab_size,
+                    temperature=float(os.getenv("RL_KERNEL_VLLM_TEMPERATURE", "1.0")),
+                    target="rollout",
+                )
+            else:
+                selected = self._linear_logp.from_local_logits(
+                    local_logits,
+                    token_ids,
+                    tp_group=context.tp_group,
+                    vocab_start_index=context.vocab_start_index,
+                    global_vocab_size=context.global_vocab_size,
+                    real_vocab_size=context.real_vocab_size,
+                    temperature=float(os.getenv("RL_KERNEL_VLLM_TEMPERATURE", "1.0")),
+                    target="rollout",
+                    diagnostics_hidden=context.hidden,
+                    diagnostics_lm_head_weight=context.lm_head_weight,
+                )
             strict_provenance = self._linear_logp.provenance
-            expected_entrypoint = (
+            expected_entrypoints = {
                 "rocm_vocab_parallel_logp_from_local_logits_tp"
                 if torch.version.hip is not None
                 else "sm90_deterministic_logp_from_local_logits_tp"
-            )
+            }
+            if top_p_replay and torch.version.hip is None:
+                expected_entrypoints.add(
+                    "sm90_deterministic_top_p_logp_from_local_logits_tp"
+                )
             if (
                 strict_provenance.get("deterministic_linear_logp") is not True
                 or strict_provenance.get("actual_backend") != self._linear_logp.backend_id
-                or strict_provenance.get("strict_entrypoint") != expected_entrypoint
+                or strict_provenance.get("strict_entrypoint")
+                not in expected_entrypoints
             ):
                 raise RuntimeError(
                     "strict vLLM rollout linear_logp did not execute the deterministic "

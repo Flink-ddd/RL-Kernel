@@ -9,6 +9,8 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <algorithm>
 #include <cctype>
+#include <climits>
+#include <cmath>
 #include <cstdlib>
 #include <cuda_bf16.h>
 #include <math_constants.h>
@@ -725,6 +727,159 @@ __global__ void linear_logp_probs_bf16_forward_kernel(
             out_target_logit[row] = target_logit;
         if (out_lse != nullptr)
             out_lse[row] = lse;
+    }
+}
+
+// Top-p replay normally contains only a handful of tokens, but materializing a
+// [N, V_local] boolean mask and scanning the complete vocabulary on every
+// decode step makes that sparse case unnecessarily expensive.  This kernel
+// consumes the compact replay set directly.  The ids are sorted in shared
+// memory and assigned to the same col % 256 lanes as the dense kernel above,
+// so each lane visits its finite logits in the same ascending-column order and
+// the final 256-lane reduction remains bitwise identical to the dense masked
+// path.
+__global__ void linear_logp_top_p_local_bf16_forward_kernel(
+    const nv_bfloat16 *__restrict__ logits,
+    const int *__restrict__ target,
+    const int *__restrict__ replay_ids,
+    const float *__restrict__ replay_logprobs,
+    const float *__restrict__ temperature,
+    float *__restrict__ out_target_logit,
+    float *__restrict__ out_lse,
+    int N,
+    int V,
+    int K,
+    int64_t logits_stride0,
+    int64_t replay_ids_stride0,
+    int64_t replay_logprobs_stride0,
+    int vocab_start_index) {
+    constexpr int THREADS = 256;
+    constexpr int SORT_SIZE = 64;
+    __shared__ int sorted_cols[SORT_SIZE];
+    __shared__ float reduce[THREADS];
+    __shared__ float row_max_shared;
+    __shared__ float row_sum_shared;
+    __shared__ float target_logit_shared;
+
+    const int row = blockIdx.x;
+    const int tid = threadIdx.x;
+    if (row >= N)
+        return;
+
+    if (tid < SORT_SIZE) {
+        int col = INT_MAX;
+        if (tid < K) {
+            const int64_t replay_offset =
+                static_cast<int64_t>(row) * replay_ids_stride0 + tid;
+            const int64_t value_offset =
+                static_cast<int64_t>(row) * replay_logprobs_stride0 + tid;
+            const int global_id = replay_ids[replay_offset];
+            if (isfinite(replay_logprobs[value_offset]) &&
+                global_id >= vocab_start_index &&
+                global_id < vocab_start_index + V) {
+                col = global_id - vocab_start_index;
+            }
+        }
+        sorted_cols[tid] = col;
+    }
+    __syncthreads();
+
+    // Fixed-size bitonic sort. Invalid entries are INT_MAX and naturally move
+    // to the end. Duplicate ids (the sampled token is also present in top-k)
+    // become adjacent and are consumed once below, matching boolean-mask
+    // semantics.
+    for (int size = 2; size <= SORT_SIZE; size <<= 1) {
+        for (int stride = size >> 1; stride > 0; stride >>= 1) {
+            if (tid < SORT_SIZE) {
+                const int peer = tid ^ stride;
+                if (peer > tid) {
+                    const int a = sorted_cols[tid];
+                    const int b = sorted_cols[peer];
+                    const bool ascending = (tid & size) == 0;
+                    if ((ascending && a > b) || (!ascending && a < b)) {
+                        sorted_cols[tid] = b;
+                        sorted_cols[peer] = a;
+                    }
+                }
+            }
+            __syncthreads();
+        }
+    }
+
+    const int tgt = target[row] - vocab_start_index;
+    const float temp = temperature[row];
+    float local_max = -CUDART_INF_F;
+    float local_target = 0.0f;
+    for (int index = 0; index < SORT_SIZE; ++index) {
+        const int col = sorted_cols[index];
+        if (col == INT_MAX)
+            break;
+        if (index > 0 && col == sorted_cols[index - 1])
+            continue;
+        if ((col & (THREADS - 1)) != tid)
+            continue;
+        const float raw = __bfloat162float(
+            logits[static_cast<int64_t>(row) * logits_stride0 + col]);
+        const float val = __bfloat162float(__float2bfloat16(raw / temp));
+        local_max = fmaxf(local_max, val);
+        if (col == tgt)
+            local_target = val;
+    }
+    reduce[tid] = local_max;
+    __syncthreads();
+    for (int offset = blockDim.x / 2; offset > 0; offset >>= 1) {
+        if (tid < offset)
+            reduce[tid] = fmaxf(reduce[tid], reduce[tid + offset]);
+        __syncthreads();
+    }
+    if (tid == 0) {
+        row_max_shared = reduce[0];
+        target_logit_shared = 0.0f;
+    }
+    __syncthreads();
+    if (local_target != 0.0f ||
+        (tgt >= 0 && tgt < V && (tgt & (THREADS - 1)) == tid)) {
+        // Only the target-owning lane writes. The second condition preserves
+        // a legitimate target logit of exactly zero.
+        for (int index = 0; index < SORT_SIZE; ++index) {
+            const int col = sorted_cols[index];
+            if (col == INT_MAX)
+                break;
+            if (col == tgt) {
+                target_logit_shared = local_target;
+                break;
+            }
+        }
+    }
+    __syncthreads();
+
+    const float row_max = row_max_shared;
+    const bool empty_row = row_max == -CUDART_INF_F;
+    float local_sum = 0.0f;
+    for (int index = 0; index < SORT_SIZE; ++index) {
+        const int col = sorted_cols[index];
+        if (col == INT_MAX)
+            break;
+        if (index > 0 && col == sorted_cols[index - 1])
+            continue;
+        if ((col & (THREADS - 1)) != tid)
+            continue;
+        const float raw = __bfloat162float(
+            logits[static_cast<int64_t>(row) * logits_stride0 + col]);
+        const float val = __bfloat162float(__float2bfloat16(raw / temp));
+        local_sum += empty_row ? 0.0f : __expf(val - row_max);
+    }
+    reduce[tid] = local_sum;
+    __syncthreads();
+    for (int offset = blockDim.x / 2; offset > 0; offset >>= 1) {
+        if (tid < offset)
+            reduce[tid] += reduce[tid + offset];
+        __syncthreads();
+    }
+    if (tid == 0) {
+        row_sum_shared = reduce[0];
+        out_lse[row] = empty_row ? -CUDART_INF_F : row_max + logf(row_sum_shared);
+        out_target_logit[row] = empty_row ? 0.0f : target_logit_shared;
     }
 }
 
@@ -1519,6 +1674,54 @@ std::vector<torch::Tensor> linear_logp_local_bf16_forward_impl(
     return {local_target_logit, local_lse};
 }
 
+std::vector<torch::Tensor> linear_logp_top_p_local_bf16_forward_impl(
+    torch::Tensor logits,
+    torch::Tensor target,
+    torch::Tensor replay_ids,
+    torch::Tensor replay_logprobs,
+    torch::Tensor temperature,
+    int64_t vocab_start_index) {
+    TORCH_CHECK(logits.is_cuda() && target.is_cuda() && replay_ids.is_cuda() &&
+                    replay_logprobs.is_cuda() && temperature.is_cuda(),
+                "top-p logits, target, replay tensors, and temperature must be CUDA tensors");
+    TORCH_CHECK(logits.scalar_type() == at::kBFloat16,
+                "top-p local logp requires bf16 logits");
+    TORCH_CHECK(replay_ids.scalar_type() == at::kInt,
+                "top-p replay ids must be int32");
+    TORCH_CHECK(replay_logprobs.scalar_type() == at::kFloat &&
+                    temperature.scalar_type() == at::kFloat,
+                "top-p replay logprobs and temperature must be fp32");
+    TORCH_CHECK(logits.dim() == 2 && replay_ids.dim() == 2 && replay_logprobs.dim() == 2,
+                "top-p local logp expects 2-D logits and replay tensors");
+    const int N = logits.size(0);
+    const int V = logits.size(1);
+    const int K = replay_ids.size(1);
+    TORCH_CHECK(target.numel() == N && replay_ids.size(0) == N &&
+                    replay_logprobs.sizes() == replay_ids.sizes(),
+                "top-p replay rows must align with logits and target");
+    TORCH_CHECK(K > 0 && K <= 64, "top-p replay width must be in [1, 64]");
+    TORCH_CHECK(temperature.numel() == N, "temperature must have one value per row");
+    TORCH_CHECK(logits.is_contiguous() && target.is_contiguous() &&
+                    replay_ids.is_contiguous() && replay_logprobs.is_contiguous() &&
+                    temperature.is_contiguous(),
+                "top-p local logp inputs must be contiguous");
+
+    c10::cuda::CUDAGuard device_guard(logits.device());
+    auto target_i = target.reshape({N}).to(torch::kInt32).contiguous();
+    auto opts_f = logits.options().dtype(torch::kFloat);
+    auto local_target_logit = torch::empty({N}, opts_f);
+    auto local_lse = torch::empty({N}, opts_f);
+    linear_logp_top_p_local_bf16_forward_kernel<<<
+        N, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+        reinterpret_cast<const nv_bfloat16 *>(logits.data_ptr<at::BFloat16>()),
+        target_i.data_ptr<int>(), replay_ids.data_ptr<int>(),
+        replay_logprobs.data_ptr<float>(), temperature.data_ptr<float>(),
+        local_target_logit.data_ptr<float>(), local_lse.data_ptr<float>(), N, V, K,
+        logits.stride(0), replay_ids.stride(0), replay_logprobs.stride(0),
+        static_cast<int>(vocab_start_index));
+    return {local_target_logit, local_lse};
+}
+
 torch::Tensor linear_logp_probs_bf16_to_dlogits_impl(torch::Tensor probs,
                                                      torch::Tensor target,
                                                      torch::Tensor grad_logp,
@@ -1794,6 +1997,17 @@ std::vector<torch::Tensor> linear_logp_local_bf16_forward(torch::Tensor logits,
                                                           torch::Tensor target,
                                                           int64_t vocab_start_index) {
     return linear_logp_local_bf16_forward_impl(logits, target, vocab_start_index);
+}
+
+std::vector<torch::Tensor> linear_logp_top_p_local_bf16_forward(
+    torch::Tensor logits,
+    torch::Tensor target,
+    torch::Tensor replay_ids,
+    torch::Tensor replay_logprobs,
+    torch::Tensor temperature,
+    int64_t vocab_start_index) {
+    return linear_logp_top_p_local_bf16_forward_impl(
+        logits, target, replay_ids, replay_logprobs, temperature, vocab_start_index);
 }
 
 torch::Tensor linear_logp_probs_bf16_to_dlogits_(torch::Tensor probs,
