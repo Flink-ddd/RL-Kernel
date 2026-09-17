@@ -283,8 +283,6 @@ def _provider_impl(request: Any, *, linear_logp: Any = None) -> LinearLogpResult
     partition = getattr(context, "vocab_partition", None)
     if strict and not isinstance(hidden, torch.Tensor):
         raise RuntimeError("strict Vime linear_logp request is missing structural context")
-    if strict and getattr(request, "log_prob_keep_mask", None) is not None:
-        raise RuntimeError("strict Vime linear_logp does not support top-p replay in this contract")
     if linear_logp is None and strict and isinstance(hidden, torch.Tensor):
         linear_logp = _default_strict_linear_logp()
     if linear_logp is not None and isinstance(hidden, torch.Tensor):
@@ -313,6 +311,11 @@ def _provider_impl(request: Any, *, linear_logp: Any = None) -> LinearLogpResult
         )
         if materialized_local_logits:
             reuse_local_logits = True
+        keep_mask = getattr(request, "log_prob_keep_mask", None)
+        if keep_mask is not None and not reuse_local_logits:
+            raise RuntimeError(
+                "strict top-p replay requires reusable materialized local logits"
+            )
         with_entropy = bool(getattr(request, "with_entropy", False))
         with_entropy_grad = bool(getattr(request, "with_entropy_grad", False))
         local_logits_temperature = _local_logits_temperature(request)
@@ -321,6 +324,7 @@ def _provider_impl(request: Any, *, linear_logp: Any = None) -> LinearLogpResult
             and with_entropy
             and not with_entropy_grad
             and _is_identity_temperature(local_logits_temperature)
+            and keep_mask is None
         )
         strict_lse = None
         if reuse_local_logits:
@@ -329,6 +333,10 @@ def _provider_impl(request: Any, *, linear_logp: Any = None) -> LinearLogpResult
                 local_logits = request_logits
             if not isinstance(local_logits, torch.Tensor):
                 raise RuntimeError("strict reusable LM-head context is missing local logits")
+            if keep_mask is not None:
+                if keep_mask.shape != local_logits.shape:
+                    raise RuntimeError("strict top-p replay mask must match local logits")
+                local_logits = local_logits.masked_fill(~keep_mask, float("-inf"))
             from_local_logits = getattr(linear_logp, "from_local_logits", None)
             if not callable(from_local_logits):
                 raise RuntimeError(
