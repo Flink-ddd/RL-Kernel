@@ -1,117 +1,105 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1180" viewBox="0 0 1600 1180">
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1080" viewBox="0 0 1600 1080">
   <defs>
     <style>
-      .bg { fill:#f4f7f5; }
-      .box { fill:#e7eeea; stroke:#8aa99a; stroke-width:2; rx:12; }
-      .input { fill:#eef4f0; stroke:#7aa68f; stroke-width:2; stroke-dasharray:8 6; rx:12; }
-      .main { fill:#0f6b4f; stroke:#0b5b43; stroke-width:2; rx:18; }
-      .group { fill:#edf3ef; stroke:#9cb3a7; stroke-width:2; rx:16; }
-      .accent { fill:#dfeae4; stroke:#6f9883; stroke-width:2; rx:10; }
-      .t1 { font-family:Arial,Helvetica,sans-serif; font-size:28px; font-weight:700; fill:#173128; }
-      .t2 { font-family:Arial,Helvetica,sans-serif; font-size:23px; font-weight:700; fill:#173128; }
-      .t3 { font-family:Arial,Helvetica,sans-serif; font-size:20px; fill:#33483f; }
-      .t4 { font-family:Arial,Helvetica,sans-serif; font-size:18px; fill:#52655d; }
-      .white { font-family:Arial,Helvetica,sans-serif; font-size:26px; font-weight:700; fill:#ffffff; }
-      .white2 { font-family:Arial,Helvetica,sans-serif; font-size:20px; fill:#e7f4ee; }
-      .label { font-family:Arial,Helvetica,sans-serif; font-size:18px; font-weight:700; fill:#0f6b4f; }
-      .line { stroke:#536b60; stroke-width:2.5; fill:none; marker-end:url(#arrow); }
-      .dash { stroke:#789385; stroke-width:2.2; fill:none; stroke-dasharray:8 6; marker-end:url(#arrow); }
+      .title { font-family: Arial, Helvetica, sans-serif; font-size: 26px; font-weight: 700; fill: #1f3b2f; }
+      .subtitle { font-family: Arial, Helvetica, sans-serif; font-size: 15px; fill: #506458; }
+      .box { fill: #ffffff; stroke: #6b8d7c; stroke-width: 1.5; }
+      .dashbox { fill: #ffffff; stroke: #7ea08d; stroke-width: 1.3; stroke-dasharray: 7 5; }
+      .core { fill: #16754f; stroke: #16754f; stroke-width: 1.5; }
+      .label { font-family: Arial, Helvetica, sans-serif; font-size: 18px; font-weight: 700; fill: #1f3b2f; }
+      .body { font-family: Arial, Helvetica, sans-serif; font-size: 14px; fill: #4a5e54; }
+      .core1 { font-family: Arial, Helvetica, sans-serif; font-size: 18px; font-weight: 700; fill: #ffffff; }
+      .core2 { font-family: Arial, Helvetica, sans-serif; font-size: 14px; fill: #ecf6f1; }
+      .green { font-family: Arial, Helvetica, sans-serif; font-size: 16px; font-weight: 700; fill: #16754f; }
+      .line { stroke: #587565; stroke-width: 1.6; fill: none; }
+      .dash { stroke: #738d80; stroke-width: 1.4; stroke-dasharray: 6 5; fill: none; }
     </style>
-    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
-      <path d="M0,0 L0,6 L9,3 z" fill="#536b60"/>
+    <marker id="arrow" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,9 L8,4.5 z" fill="#587565" />
     </marker>
   </defs>
 
-  <rect class="bg" x="0" y="0" width="1600" height="1180"/>
-  <text class="t1" x="85" y="70">Gemma-4-31B-it — RL-Kernel train / rollout consistency map</text>
-  <text class="t4" x="85" y="105">Phase A closes the text backbone first; Phase B adds the multimodal image path without weakening the same arithmetic contract.</text>
+  <rect x="0" y="0" width="1600" height="1080" fill="#ffffff" />
 
-  <!-- Text branch -->
-  <rect class="input" x="105" y="165" width="330" height="86"/>
-  <text class="t2" x="270" y="200" text-anchor="middle">Text tokens</text>
-  <text class="t4" x="270" y="228" text-anchor="middle">token ids + positions</text>
+  <text class="title" x="80" y="58">Gemma-4-31B-it — RL-Kernel train / rollout consistency map</text>
+  <text class="subtitle" x="80" y="86">Phase A closes the text backbone first; Phase B adds the multimodal image path under the same arithmetic contract.</text>
 
-  <rect class="box" x="105" y="310" width="330" height="108"/>
-  <text class="t2" x="270" y="348" text-anchor="middle">Scaled token embedding</text>
-  <text class="t4" x="270" y="378" text-anchor="middle">vocab 262144 → hidden 5376</text>
-  <text class="t4" x="270" y="402" text-anchor="middle">Gemma embedding scale</text>
+  <rect class="dashbox" x="90" y="145" width="300" height="72" rx="10" ry="10" />
+  <text class="label" x="240" y="179" text-anchor="middle">Text tokens</text>
+  <text class="body" x="240" y="201" text-anchor="middle">token ids + positions</text>
 
-  <!-- Vision branch -->
-  <rect class="input" x="1165" y="165" width="330" height="86"/>
-  <text class="t2" x="1330" y="200" text-anchor="middle">Image input</text>
-  <text class="t4" x="1330" y="228" text-anchor="middle">pixel values</text>
+  <rect class="box" x="90" y="270" width="300" height="92" rx="10" ry="10" />
+  <text class="label" x="240" y="307" text-anchor="middle">Scaled token embedding</text>
+  <text class="body" x="240" y="330" text-anchor="middle">vocab 262144 → hidden 5376</text>
+  <text class="body" x="240" y="350" text-anchor="middle">Gemma embedding scale</text>
 
-  <rect class="box" x="1165" y="310" width="330" height="108"/>
-  <text class="t2" x="1330" y="348" text-anchor="middle">Vision encoder</text>
-  <text class="t4" x="1330" y="378" text-anchor="middle">27 layers · hidden 1152</text>
-  <text class="t4" x="1330" y="402" text-anchor="middle">patch 16 · head dim 72</text>
+  <rect class="dashbox" x="1210" y="145" width="300" height="72" rx="10" ry="10" />
+  <text class="label" x="1360" y="179" text-anchor="middle">Image input</text>
+  <text class="body" x="1360" y="201" text-anchor="middle">pixel values</text>
 
-  <rect class="box" x="1165" y="468" width="330" height="92"/>
-  <text class="t2" x="1330" y="504" text-anchor="middle">Vision soft tokens</text>
-  <text class="t4" x="1330" y="534" text-anchor="middle">default output length ≈ 280</text>
+  <rect class="box" x="1210" y="270" width="300" height="92" rx="10" ry="10" />
+  <text class="label" x="1360" y="307" text-anchor="middle">Vision encoder</text>
+  <text class="body" x="1360" y="330" text-anchor="middle">27 layers · hidden 1152</text>
+  <text class="body" x="1360" y="350" text-anchor="middle">patch 16 · head dim 72</text>
 
-  <!-- Merge -->
-  <rect class="accent" x="620" y="485" width="360" height="98"/>
-  <text class="t2" x="800" y="524" text-anchor="middle">Embedding merge</text>
-  <text class="t4" x="800" y="553" text-anchor="middle">text tokens + vision soft tokens</text>
+  <rect class="box" x="1210" y="412" width="300" height="76" rx="10" ry="10" />
+  <text class="label" x="1360" y="446" text-anchor="middle">Vision soft tokens</text>
+  <text class="body" x="1360" y="469" text-anchor="middle">default output length ≈ 280</text>
 
-  <!-- Main decoder -->
-  <rect class="main" x="410" y="650" width="780" height="170"/>
-  <text class="white" x="800" y="697" text-anchor="middle">Gemma 4 text decoder × 60</text>
-  <text class="white2" x="800" y="735" text-anchor="middle">10 repeated cycles: 5 sliding-attention layers + 1 global-attention layer</text>
-  <text class="white2" x="800" y="770" text-anchor="middle">RMSNorm · Q/K Norm · Hybrid Attention · GeGLU · Residual</text>
-  <text class="white2" x="800" y="801" text-anchor="middle">strict WS1 operators → deterministic WS2 TP / CP / SP wrappers</text>
+  <rect class="box" x="635" y="418" width="330" height="82" rx="10" ry="10" />
+  <text class="label" x="800" y="452" text-anchor="middle">Embedding merge</text>
+  <text class="body" x="800" y="475" text-anchor="middle">text tokens + vision soft tokens</text>
 
-  <!-- Decoder annotations -->
-  <rect class="group" x="105" y="650" width="245" height="170"/>
-  <text class="label" x="227" y="685" text-anchor="middle">SLIDING</text>
-  <text class="t4" x="227" y="718" text-anchor="middle">Q32 / KV16</text>
-  <text class="t4" x="227" y="746" text-anchor="middle">head dim 256</text>
-  <text class="t4" x="227" y="774" text-anchor="middle">window 1024</text>
-  <text class="t4" x="227" y="802" text-anchor="middle">RoPE θ = 10000</text>
+  <rect class="core" x="400" y="566" width="800" height="146" rx="14" ry="14" />
+  <text class="core1" x="800" y="607" text-anchor="middle">Gemma 4 text decoder × 60</text>
+  <text class="core2" x="800" y="635" text-anchor="middle">10 repeated cycles: 5 sliding-attention layers + 1 global-attention layer</text>
+  <text class="core2" x="800" y="660" text-anchor="middle">RMSNorm · Q/K Norm · Hybrid Attention · GeGLU · Residual</text>
+  <text class="core2" x="800" y="685" text-anchor="middle">strict WS1 operators → deterministic WS2 TP / CP / SP wrappers</text>
 
-  <rect class="group" x="1250" y="650" width="245" height="170"/>
-  <text class="label" x="1372" y="685" text-anchor="middle">GLOBAL</text>
-  <text class="t4" x="1372" y="718" text-anchor="middle">Q32 / KV4</text>
-  <text class="t4" x="1372" y="746" text-anchor="middle">head dim 512</text>
-  <text class="t4" x="1372" y="774" text-anchor="middle">K = V semantics</text>
-  <text class="t4" x="1372" y="802" text-anchor="middle">p-RoPE · θ = 1e6</text>
+  <rect class="box" x="90" y="560" width="220" height="126" rx="10" ry="10" />
+  <text class="green" x="200" y="590" text-anchor="middle">SLIDING</text>
+  <text class="body" x="200" y="620" text-anchor="middle">Q32 / KV16</text>
+  <text class="body" x="200" y="646" text-anchor="middle">head dim 256</text>
+  <text class="body" x="200" y="672" text-anchor="middle">window 1024 · RoPE θ = 10000</text>
 
-  <!-- Output chain -->
-  <rect class="box" x="260" y="900" width="280" height="92"/>
-  <text class="t2" x="400" y="938" text-anchor="middle">Final RMSNorm</text>
-  <text class="t4" x="400" y="968" text-anchor="middle">Gemma arithmetic order</text>
+  <rect class="box" x="1290" y="560" width="220" height="126" rx="10" ry="10" />
+  <text class="green" x="1400" y="590" text-anchor="middle">GLOBAL</text>
+  <text class="body" x="1400" y="620" text-anchor="middle">Q32 / KV4</text>
+  <text class="body" x="1400" y="646" text-anchor="middle">head dim 512</text>
+  <text class="body" x="1400" y="672" text-anchor="middle">K = V · p-RoPE θ = 1e6</text>
 
-  <rect class="box" x="660" y="900" width="280" height="92"/>
-  <text class="t2" x="800" y="938" text-anchor="middle">Tied LM head</text>
-  <text class="t4" x="800" y="968" text-anchor="middle">5376 → 262144</text>
+  <rect class="box" x="260" y="800" width="250" height="78" rx="10" ry="10" />
+  <text class="label" x="385" y="834" text-anchor="middle">Final RMSNorm</text>
+  <text class="body" x="385" y="857" text-anchor="middle">Gemma arithmetic order</text>
 
-  <rect class="box" x="1060" y="900" width="280" height="92"/>
-  <text class="t2" x="1200" y="938" text-anchor="middle">Logit softcap</text>
-  <text class="t4" x="1200" y="968" text-anchor="middle">30 · tanh(logit / 30)</text>
+  <rect class="box" x="675" y="800" width="250" height="78" rx="10" ry="10" />
+  <text class="label" x="800" y="834" text-anchor="middle">Tied LM head</text>
+  <text class="body" x="800" y="857" text-anchor="middle">5376 → 262144</text>
 
-  <rect class="input" x="660" y="1055" width="280" height="74"/>
-  <text class="t2" x="800" y="1099" text-anchor="middle">Selected-token logprob</text>
+  <rect class="box" x="1090" y="800" width="250" height="78" rx="10" ry="10" />
+  <text class="label" x="1215" y="834" text-anchor="middle">Logit softcap</text>
+  <text class="body" x="1215" y="857" text-anchor="middle">30 · tanh(logit / 30)</text>
 
-  <!-- Arrows -->
-  <path class="line" d="M270 251 L270 310"/>
-  <path class="line" d="M1330 251 L1330 310"/>
-  <path class="line" d="M1330 418 L1330 468"/>
-  <path class="line" d="M435 364 C560 364 560 534 620 534"/>
-  <path class="line" d="M1165 514 C1060 514 1040 534 980 534"/>
-  <path class="line" d="M800 583 L800 650"/>
-  <path class="dash" d="M350 735 L410 735"/>
-  <path class="dash" d="M1250 735 L1190 735"/>
-  <path class="line" d="M800 820 L800 860 C800 880 400 880 400 900"/>
-  <path class="line" d="M540 946 L660 946"/>
-  <path class="line" d="M940 946 L1060 946"/>
-  <path class="line" d="M1200 992 L1200 1025 C1200 1042 940 1042 940 1092"/>
-  <path class="line" d="M940 1092 L940 1092 L940 1092"/>
-  <path class="line" d="M1060 1092 L940 1092"/>
+  <rect class="dashbox" x="665" y="944" width="270" height="68" rx="10" ry="10" />
+  <text class="label" x="800" y="985" text-anchor="middle">Selected-token logprob</text>
 
-  <text class="label" x="106" y="1125">WS1: exact operator contract</text>
-  <text class="t4" x="355" y="1125">→</text>
-  <text class="label" x="390" y="1125">WS2: TP / CP / SP equivalence</text>
-  <text class="t4" x="735" y="1125">→</text>
-  <text class="label" x="770" y="1125">VIME / vLLM end-to-end validation</text>
+  <text class="green" x="90" y="1016">WS1: exact operator contract</text>
+  <text class="green" x="400" y="1016">WS2: TP / CP / SP equivalence</text>
+  <text class="green" x="800" y="1016">VIME / vLLM end-to-end validation</text>
+
+  <line class="line" x1="240" y1="217" x2="240" y2="270" marker-end="url(#arrow)" />
+  <line class="line" x1="1360" y1="217" x2="1360" y2="270" marker-end="url(#arrow)" />
+  <line class="line" x1="1360" y1="362" x2="1360" y2="412" marker-end="url(#arrow)" />
+
+  <path class="line" d="M390 316 C500 316 530 459 635 459" marker-end="url(#arrow)" />
+  <path class="line" d="M1210 450 C1095 450 1070 459 965 459" marker-end="url(#arrow)" />
+  <line class="line" x1="800" y1="500" x2="800" y2="566" marker-end="url(#arrow)" />
+
+  <line class="dash" x1="310" y1="623" x2="400" y2="623" marker-end="url(#arrow)" />
+  <line class="dash" x1="1290" y1="623" x2="1200" y2="623" marker-end="url(#arrow)" />
+
+  <path class="line" d="M720 712 C720 758 385 758 385 800" marker-end="url(#arrow)" />
+  <line class="line" x1="510" y1="839" x2="675" y2="839" marker-end="url(#arrow)" />
+  <line class="line" x1="925" y1="839" x2="1090" y2="839" marker-end="url(#arrow)" />
+  <path class="line" d="M1215 878 C1215 925 860 925 860 944" marker-end="url(#arrow)" />
 </svg>
