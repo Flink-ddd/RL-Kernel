@@ -11,13 +11,10 @@ import pytest
 import torch
 
 from rl_engine.integrations import framework_operators
-from rl_engine.integrations.framework_operators import MegatronLogpOperator
 from rl_engine.integrations.ablation import IntegrationPlan
+from rl_engine.integrations.framework_operators import MegatronLogpOperator
 from rl_engine.integrations.megatron import MegatronIntegration
-from rl_engine.integrations.state import (
-    clear_active_integration,
-    set_active_integration,
-)
+from rl_engine.integrations.state import clear_active_integration, set_active_integration
 from rl_engine.integrations.vime.linear_logp_provider import (
     LinearLogpProviderUnavailable,
     LinearLogpResult,
@@ -106,9 +103,7 @@ def test_provider_entropy_preserves_vime_semantics_and_autograd():
     result = provider(request)
     reference_logits = request.logits.detach().clone().requires_grad_(True)
     log_probs = torch.log_softmax(reference_logits[:, :7], dim=-1)
-    reference_logp = log_probs[
-        torch.arange(reference_logits.size(0)), request.target_ids
-    ]
+    reference_logp = log_probs[torch.arange(reference_logits.size(0)), request.target_ids]
     reference_entropy = -(log_probs.exp() * log_probs).sum(dim=-1)
 
     torch.testing.assert_close(result.logp.squeeze(-1), reference_logp)
@@ -141,15 +136,98 @@ def test_provider_structural_path_returns_linear_logp_result(monkeypatch):
 
     import rl_engine.integrations.vime.linear_logp_provider as provider_module
 
-    monkeypatch.setattr(
-        provider_module, "_default_strict_linear_logp", lambda: FakeLinearLogp()
-    )
+    monkeypatch.setattr(provider_module, "_default_strict_linear_logp", lambda: FakeLinearLogp())
     request = _structural_request()
     result = provider(request)
 
     assert isinstance(result, LinearLogpResult)
     assert result.logp.shape == (3, 1)
     assert result.provenance["execution"]["role"] == "vime_training_linear_logp"
+
+
+@pytest.mark.parametrize(
+    ("pre_scaled", "expected_temperature"),
+    ((True, None), (False, 0.7)),
+    ids=("legacy-vime-pre-scaled", "current-vime-unscaled"),
+)
+def test_provider_applies_temperature_once_for_both_vime_contracts(
+    monkeypatch, pre_scaled, expected_temperature
+):
+    monkeypatch.setenv("VIME_RL_KERNEL_STRICT", "1")
+    observed = {}
+
+    class FakeLinearLogp:
+        backend_id = "fake-linear-logp"
+        provenance = {"actual_backend": "fake-linear-logp"}
+
+        def from_local_logits(self, local_logits, target_ids, **kwargs):
+            temperature = kwargs["temperature"]
+            observed["temperature"] = temperature
+            effective_logits = local_logits.float()
+            if temperature is not None:
+                effective_logits = effective_logits / temperature
+            return torch.log_softmax(effective_logits[:, :7], dim=-1)[
+                torch.arange(target_ids.size(0)), target_ids
+            ]
+
+    import rl_engine.integrations.vime.linear_logp_provider as provider_module
+
+    monkeypatch.setattr(provider_module.torch.version, "hip", "6.0")
+    monkeypatch.setattr(provider_module, "_default_strict_linear_logp", lambda: FakeLinearLogp())
+    request = _structural_request()
+    request.temperature = 0.7
+    unscaled_logits = request.logits.detach().clone()
+    if pre_scaled:
+        # Vime c80200e (used by the PR #400 run) divides before provider
+        # dispatch and publishes this marker.  Vime PRs #423/#424 dispatch
+        # unscaled logits and omit the marker.
+        request.logits = request.logits / request.temperature
+        request.metadata["logits_are_temperature_scaled"] = True
+
+    result = provider(request)
+    expected = torch.log_softmax(unscaled_logits[:, :7] / request.temperature, dim=-1)[
+        torch.arange(request.target_ids.size(0)), request.target_ids
+    ]
+
+    assert result.logp.shape == (3, 1)
+    assert observed["temperature"] == expected_temperature
+    torch.testing.assert_close(result.logp.squeeze(-1), expected)
+
+
+def test_pre_scaled_marker_does_not_change_hidden_recomputation_temperature(
+    monkeypatch,
+):
+    """The compatibility marker applies only when the supplied logits are reused."""
+
+    monkeypatch.setenv("VIME_RL_KERNEL_STRICT", "1")
+    observed = {}
+
+    class FakeLinearLogp:
+        backend_id = "fake-linear-logp"
+        provenance = {"actual_backend": "fake-linear-logp"}
+
+        def __call__(self, hidden, weight, target_ids, bias, **kwargs):
+            observed["temperature"] = kwargs["temperature"]
+            logits = hidden @ weight.transpose(0, 1)
+            if bias is not None:
+                logits = logits + bias
+            logits = logits / kwargs["temperature"]
+            return torch.log_softmax(logits[:, :7], dim=-1)[
+                torch.arange(target_ids.size(0)), target_ids
+            ]
+
+    import rl_engine.integrations.vime.linear_logp_provider as provider_module
+
+    monkeypatch.setattr(provider_module.torch.version, "hip", None)
+    monkeypatch.setattr(provider_module, "_default_strict_linear_logp", lambda: FakeLinearLogp())
+    request = _structural_request()
+    request.temperature = 0.7
+    request.metadata["logits_are_temperature_scaled"] = True
+
+    result = provider(request)
+
+    assert result.logp.shape == (3, 1)
+    assert observed["temperature"] == 0.7
 
 
 def test_megatron_adapter_forwards_structured_context(monkeypatch):
@@ -168,9 +246,7 @@ def test_megatron_adapter_forwards_structured_context(monkeypatch):
         )
 
     wrapper = SimpleNamespace(backend_id="fake-linear-logp", provenance={})
-    monkeypatch.setattr(
-        framework_operators, "_require_nvidia_cuda", lambda *_args: None
-    )
+    monkeypatch.setattr(framework_operators, "_require_nvidia_cuda", lambda *_args: None)
     result = MegatronLogpOperator(provider, linear_logp=wrapper)(request)
 
     assert observed["context"] is request.context
