@@ -2360,6 +2360,42 @@ class VllmLogpOperator:
                     f"{context.hidden.size(0)} != {token_ids.numel()}"
                 )
             assert self._linear_logp is not None
+            top_p_replay = False
+            if getattr(sampling_metadata, "top_p", None) is not None:
+                # Native vLLM has already applied temperature/top-p before it
+                # builds LogprobsTensors.  Reconstruct the exact finite nucleus
+                # on each TP shard so the strict replacement keeps processed
+                # logprob semantics instead of accidentally substituting a
+                # full-vocabulary selected logprob.
+                replay_ids = logprobs_tensors.logprob_token_ids
+                replay_values = logprobs_tensors.logprobs
+                if replay_ids.shape != replay_values.shape:
+                    raise RuntimeError(
+                        "vLLM top-p replay ids and logprobs must have matching shapes"
+                    )
+                if replay_ids.size(0) != local_logits.size(0):
+                    raise RuntimeError(
+                        "vLLM top-p replay rows are not aligned with strict local logits"
+                    )
+                vocab_start = int(context.vocab_start_index)
+                vocab_end = vocab_start + int(local_logits.size(1))
+                local_keep = torch.zeros_like(local_logits, dtype=torch.bool)
+                valid = (
+                    torch.isfinite(replay_values)
+                    & (replay_ids >= vocab_start)
+                    & (replay_ids < vocab_end)
+                )
+                replay_rows = (
+                    torch.arange(replay_ids.size(0), device=replay_ids.device)
+                    .unsqueeze(1)
+                    .expand_as(replay_ids)
+                )
+                local_keep[
+                    replay_rows[valid],
+                    replay_ids[valid].to(torch.long) - vocab_start,
+                ] = True
+                local_logits = local_logits.masked_fill(~local_keep, float("-inf"))
+                top_p_replay = True
             selected = self._linear_logp.from_local_logits(
                 local_logits,
                 token_ids,
@@ -2398,6 +2434,7 @@ class VllmLogpOperator:
                     "logits_materialized": True,
                     "padded_lm_head_alignment": True,
                     "duplicate_lm_head_gemm": False,
+                    "top_p_replay": top_p_replay,
                 },
                 "source_logits_shape": list(source_logits.shape),
                 "source_logits_dtype": _dtype_name(source_logits),
