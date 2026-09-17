@@ -684,11 +684,17 @@ __global__ void linear_logp_probs_bf16_forward_kernel(
     __syncthreads();
 
     const float row_max = row_max_shared;
+    // A top-p replay mask can leave an entire TP vocab shard empty for a
+    // particular row.  Treat that shard as the additive logsumexp identity
+    // (LSE=-inf, selected-logit=0) instead of evaluating -inf - -inf below.
+    // At least one TP rank still owns a finite nucleus entry for every valid
+    // sampled row, so the global rank-ordered merge remains well-defined.
+    const bool empty_row = row_max == -CUDART_INF_F;
     float local_sum = 0.0f;
     for (int col = tid; col < V; col += blockDim.x) {
         const float val =
             __bfloat162float(logits[static_cast<int64_t>(row) * logits_stride0 + col]);
-        local_sum += __expf(val - row_max);
+        local_sum += empty_row ? 0.0f : __expf(val - row_max);
     }
     reduce[tid] = local_sum;
     __syncthreads();
@@ -702,20 +708,21 @@ __global__ void linear_logp_probs_bf16_forward_kernel(
     __syncthreads();
 
     if (probs != nullptr) {
-        const float inv_sum = 1.0f / row_sum_shared;
+        const float inv_sum = empty_row ? 0.0f : 1.0f / row_sum_shared;
         for (int col = tid; col < V; col += blockDim.x) {
             const float val =
                 __bfloat162float(logits[static_cast<int64_t>(row) * logits_stride0 + col]);
             probs[static_cast<int64_t>(row) * probs_stride0 + col] =
-                __float2bfloat16(__expf(val - row_max) * inv_sum);
+                __float2bfloat16(empty_row ? 0.0f : __expf(val - row_max) * inv_sum);
         }
     }
     if (tid == 0) {
-        const float lse = row_max + logf(row_sum_shared);
+        const float lse = empty_row ? -CUDART_INF_F : row_max + logf(row_sum_shared);
+        const float target_logit = empty_row ? 0.0f : target_logit_shared;
         if (out_logp != nullptr)
-            out_logp[row] = target_logit_shared - lse;
+            out_logp[row] = empty_row ? -CUDART_INF_F : target_logit - lse;
         if (out_target_logit != nullptr)
-            out_target_logit[row] = target_logit_shared;
+            out_target_logit[row] = target_logit;
         if (out_lse != nullptr)
             out_lse[row] = lse;
     }
