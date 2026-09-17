@@ -1,0 +1,111 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1700" height="1320" viewBox="0 0 1700 1320">
+  <defs>
+    <style>
+      .bg { fill:#f4f7f5; }
+      .box { fill:#e7eeea; stroke:#8aa99a; stroke-width:2; rx:10; }
+      .strong { fill:#dce9e2; stroke:#6e9882; stroke-width:2.2; rx:10; }
+      .attn { fill:#0f6b4f; stroke:#0b5b43; stroke-width:2; rx:14; }
+      .resid { fill:#edf3ef; stroke:#9bb0a5; stroke-width:2; rx:10; }
+      .note { fill:#f8faf9; stroke:#aebdb5; stroke-width:1.8; stroke-dasharray:7 5; rx:10; }
+      .h1 { font-family:Arial,Helvetica,sans-serif; font-size:28px; font-weight:700; fill:#173128; }
+      .h2 { font-family:Arial,Helvetica,sans-serif; font-size:22px; font-weight:700; fill:#173128; }
+      .txt { font-family:Arial,Helvetica,sans-serif; font-size:19px; fill:#374c42; }
+      .small { font-family:Arial,Helvetica,sans-serif; font-size:17px; fill:#586a61; }
+      .green { font-family:Arial,Helvetica,sans-serif; font-size:18px; font-weight:700; fill:#0f6b4f; }
+      .white { font-family:Arial,Helvetica,sans-serif; font-size:22px; font-weight:700; fill:#ffffff; }
+      .white2 { font-family:Arial,Helvetica,sans-serif; font-size:18px; fill:#e8f4ee; }
+      .line { stroke:#536b60; stroke-width:2.4; fill:none; marker-end:url(#arrow); }
+      .split { stroke:#688277; stroke-width:2; fill:none; }
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#536b60"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1700" height="1320"/>
+  <text class="h1" x="80" y="65">One Gemma 4 text decoder layer — strict operator boundaries</text>
+  <text class="small" x="80" y="100">The layer type is part of the runtime identity: sliding-attention and global-attention layers do not share one generic attention contract.</text>
+
+  <!-- Input and first norm -->
+  <rect class="note" x="660" y="145" width="380" height="70"/>
+  <text class="h2" x="850" y="188" text-anchor="middle">Input hidden states [T, 5376]</text>
+
+  <rect class="box" x="690" y="260" width="320" height="78"/>
+  <text class="h2" x="850" y="306" text-anchor="middle">Input RMSNorm</text>
+
+  <!-- QKV projections -->
+  <rect class="strong" x="190" y="400" width="350" height="100"/>
+  <text class="h2" x="365" y="437" text-anchor="middle">Q projection</text>
+  <text class="small" x="365" y="468" text-anchor="middle">sliding: 5376→8192 · global: 5376→16384</text>
+
+  <rect class="strong" x="675" y="400" width="350" height="100"/>
+  <text class="h2" x="850" y="437" text-anchor="middle">K projection</text>
+  <text class="small" x="850" y="468" text-anchor="middle">sliding: 5376→4096 · global geometry: 2048</text>
+
+  <rect class="strong" x="1160" y="400" width="350" height="100"/>
+  <text class="h2" x="1335" y="437" text-anchor="middle">V projection</text>
+  <text class="small" x="1335" y="468" text-anchor="middle">global path freezes K = V parameter semantics</text>
+
+  <rect class="box" x="250" y="560" width="300" height="82"/>
+  <text class="h2" x="400" y="608" text-anchor="middle">Q RMSNorm</text>
+
+  <rect class="box" x="675" y="560" width="300" height="82"/>
+  <text class="h2" x="825" y="608" text-anchor="middle">K RMSNorm</text>
+
+  <!-- Two attention type panels -->
+  <rect class="box" x="125" y="700" width="620" height="190"/>
+  <text class="green" x="435" y="740" text-anchor="middle">SLIDING ATTENTION LAYER</text>
+  <text class="txt" x="435" y="780" text-anchor="middle">Q32 / KV16 · head dim 256 · causal window 1024</text>
+  <rect class="strong" x="220" y="812" width="430" height="52"/>
+  <text class="h2" x="435" y="846" text-anchor="middle">Standard RoPE · θ = 10000</text>
+
+  <rect class="box" x="955" y="700" width="620" height="190"/>
+  <text class="green" x="1265" y="740" text-anchor="middle">GLOBAL ATTENTION LAYER</text>
+  <text class="txt" x="1265" y="780" text-anchor="middle">Q32 / KV4 · head dim 512 · full attention · K = V</text>
+  <rect class="strong" x="1050" y="812" width="430" height="52"/>
+  <text class="h2" x="1265" y="846" text-anchor="middle">Proportional p-RoPE · partial factor 0.25</text>
+
+  <rect class="attn" x="570" y="950" width="560" height="100"/>
+  <text class="white" x="850" y="990" text-anchor="middle">Strict attention core</text>
+  <text class="white2" x="850" y="1022" text-anchor="middle">fixed reduction / split policy · prefill / decode / KV-cache identity</text>
+
+  <!-- Attention output and residual -->
+  <rect class="box" x="180" y="1110" width="300" height="82"/>
+  <text class="h2" x="330" y="1158" text-anchor="middle">O projection</text>
+
+  <rect class="box" x="535" y="1110" width="300" height="82"/>
+  <text class="h2" x="685" y="1158" text-anchor="middle">Post-attn RMSNorm</text>
+
+  <rect class="resid" x="890" y="1110" width="300" height="82"/>
+  <text class="h2" x="1040" y="1158" text-anchor="middle">Residual add</text>
+
+  <!-- FFN compact chain -->
+  <rect class="box" x="1245" y="1080" width="330" height="140"/>
+  <text class="green" x="1410" y="1118" text-anchor="middle">FFN PATH</text>
+  <text class="small" x="1410" y="1150" text-anchor="middle">pre-FFN RMSNorm</text>
+  <text class="small" x="1410" y="1175" text-anchor="middle">gate/up GEMM → GELU-tanh × up</text>
+  <text class="small" x="1410" y="1200" text-anchor="middle">down GEMM → post-FFN RMSNorm → residual</text>
+
+  <!-- Arrows -->
+  <path class="line" d="M850 215 L850 260"/>
+  <path class="split" d="M850 338 L850 365"/>
+  <path class="split" d="M365 365 L1335 365"/>
+  <path class="line" d="M365 365 L365 400"/>
+  <path class="line" d="M850 365 L850 400"/>
+  <path class="line" d="M1335 365 L1335 400"/>
+  <path class="line" d="M365 500 L400 560"/>
+  <path class="line" d="M850 500 L825 560"/>
+  <path class="split" d="M400 642 L400 675"/>
+  <path class="split" d="M825 642 L825 675"/>
+  <path class="split" d="M400 675 L1265 675"/>
+  <path class="line" d="M435 675 L435 700"/>
+  <path class="line" d="M1265 675 L1265 700"/>
+  <path class="line" d="M435 890 C435 925 650 925 650 950"/>
+  <path class="line" d="M1265 890 C1265 925 1050 925 1050 950"/>
+  <path class="line" d="M850 1050 L850 1075 C850 1095 330 1095 330 1110"/>
+  <path class="line" d="M480 1151 L535 1151"/>
+  <path class="line" d="M835 1151 L890 1151"/>
+  <path class="line" d="M1190 1151 L1245 1151"/>
+
+  <text class="small" x="80" y="1280">WS1 qualifies each arithmetic boundary. WS2 wraps the same boundary with deterministic TP/CP/SP ownership and fixed communication/reduction order.</text>
+</svg>
