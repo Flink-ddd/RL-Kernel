@@ -12,39 +12,34 @@
       .green { font-family: Arial, Helvetica, sans-serif; font-size: 15px; font-weight: 700; fill: #16754f; }
       .core1 { font-family: Arial, Helvetica, sans-serif; font-size: 18px; font-weight: 700; fill: #ffffff; }
       .core2 { font-family: Arial, Helvetica, sans-serif; font-size: 13px; fill: #ecf6f1; }
-      .line { stroke: #587565; stroke-width: 1.6; fill: none; }
+      .line { stroke: #587565; stroke-width: 1.2; fill: none; }
     </style>
-    <marker id="arrow" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto" markerUnits="strokeWidth">
-      <path d="M0,0 L0,9 L8,4.5 z" fill="#587565" />
+    <marker id="arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,7 L7,3.5 z" fill="#587565" />
     </marker>
   </defs>
 
   <rect x="0" y="0" width="1600" height="1080" fill="#ffffff" />
-
   <text class="title" x="75" y="58">One Gemma 4 text decoder layer — strict operator boundaries</text>
   <text class="subtitle" x="75" y="84">Layer type is part of the runtime identity: sliding-attention and global-attention layers do not share one generic attention contract.</text>
 
   <rect class="dashbox" x="570" y="120" width="460" height="66" rx="10" ry="10" />
   <text class="label" x="800" y="159" text-anchor="middle">Input hidden states [T, 5376]</text>
-
   <rect class="box" x="650" y="225" width="300" height="72" rx="10" ry="10" />
   <text class="label" x="800" y="267" text-anchor="middle">Input RMSNorm</text>
 
   <rect class="box" x="115" y="362" width="340" height="84" rx="10" ry="10" />
   <text class="label" x="285" y="396" text-anchor="middle">Q projection</text>
   <text class="body" x="285" y="421" text-anchor="middle">sliding: 5376→8192 · global: 5376→16384</text>
-
   <rect class="box" x="630" y="362" width="340" height="84" rx="10" ry="10" />
   <text class="label" x="800" y="396" text-anchor="middle">K projection</text>
   <text class="body" x="800" y="421" text-anchor="middle">sliding: 5376→4096 · global geometry: 2048</text>
-
   <rect class="box" x="1145" y="362" width="340" height="84" rx="10" ry="10" />
   <text class="label" x="1315" y="396" text-anchor="middle">V projection</text>
   <text class="body" x="1315" y="421" text-anchor="middle">global path freezes K = V parameter semantics</text>
 
   <rect class="box" x="170" y="497" width="230" height="62" rx="10" ry="10" />
   <text class="label" x="285" y="535" text-anchor="middle">Q RMSNorm</text>
-
   <rect class="box" x="685" y="497" width="230" height="62" rx="10" ry="10" />
   <text class="label" x="800" y="535" text-anchor="middle">K RMSNorm</text>
 
@@ -66,40 +61,36 @@
 
   <rect class="box" x="125" y="970" width="220" height="58" rx="10" ry="10" />
   <text class="label" x="235" y="1005" text-anchor="middle">O projection</text>
-
   <rect class="box" x="405" y="970" width="220" height="58" rx="10" ry="10" />
   <text class="label" x="515" y="1005" text-anchor="middle">Post-attn RMSNorm</text>
-
   <rect class="box" x="685" y="970" width="220" height="58" rx="10" ry="10" />
   <text class="label" x="795" y="1005" text-anchor="middle">Residual add</text>
-
   <rect class="box" x="965" y="952" width="480" height="92" rx="10" ry="10" />
   <text class="green" x="1205" y="983" text-anchor="middle">FFN PATH</text>
   <text class="body" x="1205" y="1006" text-anchor="middle">pre-FFN RMSNorm</text>
   <text class="body" x="1205" y="1024" text-anchor="middle">gate/up GEMM → GELU-tanh × up</text>
   <text class="body" x="1205" y="1040" text-anchor="middle">down GEMM → post-FFN RMSNorm → residual</text>
-
   <text class="subtitle" x="75" y="1060">WS1 qualifies each arithmetic boundary. WS2 wraps the same boundary with deterministic TP/CP/SP ownership and fixed communication/reduction order.</text>
 
   <line class="line" x1="800" y1="186" x2="800" y2="225" marker-end="url(#arrow)" />
   <line class="line" x1="800" y1="297" x2="800" y2="335" />
-  <line class="line" x1="800" y1="335" x2="285" y2="335" />
+  <line class="line" x1="285" y1="335" x2="1315" y2="335" />
   <line class="line" x1="285" y1="335" x2="285" y2="362" marker-end="url(#arrow)" />
   <line class="line" x1="800" y1="335" x2="800" y2="362" marker-end="url(#arrow)" />
-  <line class="line" x1="800" y1="335" x2="1315" y2="335" />
   <line class="line" x1="1315" y1="335" x2="1315" y2="362" marker-end="url(#arrow)" />
-
   <line class="line" x1="285" y1="446" x2="285" y2="497" marker-end="url(#arrow)" />
   <line class="line" x1="800" y1="446" x2="800" y2="497" marker-end="url(#arrow)" />
 
-  <path class="line" d="M285 559 L285 620" marker-end="url(#arrow)" />
-  <path class="line" d="M800 559 L800 620" marker-end="url(#arrow)" />
-  <path class="line" d="M1315 446 L1315 620" marker-end="url(#arrow)" />
+  <line class="line" x1="285" y1="559" x2="285" y2="590" />
+  <line class="line" x1="800" y1="559" x2="800" y2="590" />
+  <line class="line" x1="1315" y1="446" x2="1315" y2="590" />
+  <line class="line" x1="285" y1="590" x2="1315" y2="590" />
+  <line class="line" x1="385" y1="590" x2="385" y2="620" marker-end="url(#arrow)" />
+  <line class="line" x1="1215" y1="590" x2="1215" y2="620" marker-end="url(#arrow)" />
 
-  <path class="line" d="M385 780 C385 820 610 820 610 840" marker-end="url(#arrow)" />
-  <path class="line" d="M1215 780 C1215 820 990 820 990 840" marker-end="url(#arrow)" />
-
-  <line class="line" x1="535" y1="884" x2="345" y2="999" marker-end="url(#arrow)" />
+  <path class="line" d="M385 780 L385 812 L610 812 L610 840" marker-end="url(#arrow)" />
+  <path class="line" d="M1215 780 L1215 812 L990 812 L990 840" marker-end="url(#arrow)" />
+  <path class="line" d="M800 928 L800 946 L235 946 L235 970" marker-end="url(#arrow)" />
   <line class="line" x1="345" y1="999" x2="405" y2="999" marker-end="url(#arrow)" />
   <line class="line" x1="625" y1="999" x2="685" y2="999" marker-end="url(#arrow)" />
   <line class="line" x1="905" y1="999" x2="965" y2="999" marker-end="url(#arrow)" />
