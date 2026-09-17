@@ -221,7 +221,14 @@ def _is_identity_temperature(value: Any) -> bool:
 
 
 def _local_logits_temperature(request: Any) -> Any:
-    """Return scaling still required for logits supplied by Vime."""
+    """Return scaling still required by the Vime local-logits contract.
+
+    Older Vime revisions scale ``request.logits`` before provider dispatch and
+    advertise that fact with ``logits_are_temperature_scaled``.  Current Vime
+    revisions dispatch unscaled logits and leave the marker absent.  Only the
+    reused-local-logits path consumes this distinction; recomputation from
+    hidden states always starts from unscaled values.
+    """
 
     if _metadata(request).get("logits_are_temperature_scaled") is True:
         return None
@@ -298,7 +305,8 @@ def _provider_impl(request: Any, *, linear_logp: Any = None) -> LinearLogpResult
             and isinstance(request_logits, torch.Tensor)
             and request_logits.ndim == 2
             and request_logits.dtype in (torch.bfloat16, torch.float16, torch.float32)
-            and request_logits.shape == (
+            and request_logits.shape
+            == (
                 hidden.size(0),
                 projection.weight.size(0),
             )
