@@ -42,6 +42,7 @@ OP_SPECS = {
             "triton": "rl_engine.kernels.ops.triton.rmsnorm_triton.RMSNormTritonOp",
             "cuda": "rl_engine.kernels.ops.cuda.norm.rmsnorm.RMSNormCudaOp",
             "cuda-sm90": "rl_engine.kernels.ops.cuda.norm.rmsnorm.RMSNormCudaOp",
+            "ascend": "rl_engine.kernels.ops.ascend.norm.rmsnorm.RMSNormAscendOp",
         },
         grad_input_names=("x", "weight"),
     ),
@@ -55,6 +56,7 @@ OP_SPECS = {
             "triton": "rl_engine.kernels.ops.triton.rmsnorm_triton.RMSNormTritonOp",
             "cuda": "rl_engine.kernels.ops.cuda.norm.rmsnorm.RMSNormCudaOp",
             "cuda-sm90": "rl_engine.kernels.ops.cuda.norm.rmsnorm.RMSNormCudaOp",
+            "ascend": "rl_engine.kernels.ops.ascend.norm.rmsnorm.RMSNormAscendOp",
         },
         grad_input_names=("x", "weight"),
     ),
@@ -73,8 +75,31 @@ OP_SPECS = {
                 "rl_engine.kernels.ops.cuda.attention.deterministic_attn."
                 "DeterministicAttentionOp"
             ),
+            "ascend": (
+                "rl_engine.kernels.ops.ascend.attention.deterministic_attn."
+                "DeterministicAttentionAscendOp"
+            ),
         },
         grad_input_names=("q", "k", "v"),
+    ),
+    # GRPO decode: every G group attends over one shared K/V sequence
+    # ([B, Skv, D] instead of [B, Hkv, Skv, D]). Forward-only (no backward),
+    # same surface as the CUDA PrefixSharedAttentionOp.
+    "prefix_shared_attention": OperatorSpec(
+        name="prefix_shared_attention",
+        op_class="attention",
+        gold_path="rl_engine.kernels.gtest.operator_specs.GtestPrefixSharedAttentionOp",
+        gold_method="forward_fp32",
+        candidate_paths={
+            "pytorch": "rl_engine.kernels.gtest.operator_specs.GtestPrefixSharedAttentionOp",
+            "cuda": (
+                "rl_engine.kernels.ops.cuda.attention.prefix_shared_attn." "PrefixSharedAttentionOp"
+            ),
+            "ascend": (
+                "rl_engine.kernels.ops.ascend.attention.prefix_shared_attn."
+                "PrefixSharedAttentionAscendOp"
+            ),
+        },
     ),
     "cp_attention": OperatorSpec(
         name="cp_attention",
@@ -103,6 +128,7 @@ OP_SPECS = {
             "cuda": "rl_engine.kernels.ops.cuda.loss.logp.FusedLogpGenericOp",
             "cuda-generic": "rl_engine.kernels.ops.cuda.loss.logp.FusedLogpGenericOp",
             "cuda-sm90": "rl_engine.kernels.ops.cuda.loss.logp.FusedLogpSM90Op",
+            "ascend": "rl_engine.kernels.ops.ascend.loss.logp.FusedLogpAscendOp",
         },
         grad_input_names=("logits",),
     ),
@@ -115,6 +141,7 @@ OP_SPECS = {
             "pytorch": "rl_engine.kernels.ops.pytorch.loss.linear_logp.NativeLinearLogpOp",
             "triton": "rl_engine.kernels.ops.triton.loss.linear_logp.TritonLinearLogpOp",
             "cuda-sm90": "rl_engine.kernels.ops.cuda.loss.linear_logp.FusedLinearLogpSM90Op",
+            "ascend": "rl_engine.kernels.ops.ascend.loss.linear_logp.FusedLinearLogpAscendOp",
         },
         grad_input_names=("hidden", "lm_head_weight"),
     ),
@@ -127,6 +154,7 @@ OP_SPECS = {
             "pytorch": "rl_engine.kernels.ops.pytorch.linear.embedding.NativeEmbeddingOp",
             "triton": "rl_engine.kernels.ops.triton.linear.embedding.TritonEmbeddingOp",
             "cuda-sm90": "rl_engine.kernels.ops.cuda.linear.embedding.SM90EmbeddingOp",
+            "ascend": "rl_engine.kernels.ops.ascend.linear.embedding.AscendEmbeddingOp",
         },
         grad_input_names=("weight",),
     ),
@@ -139,18 +167,24 @@ OP_SPECS = {
             "pytorch": "rl_engine.kernels.ops.pytorch.linear.lm_head.NativeLMHeadOp",
             "triton": "rl_engine.kernels.ops.triton.linear.lm_head.TritonLMHeadOp",
             "cuda-sm90": "rl_engine.kernels.ops.cuda.linear.lm_head.SM90LMHeadOp",
+            "ascend": "rl_engine.kernels.ops.ascend.linear.lm_head.AscendLMHeadOp",
         },
         grad_input_names=("hidden", "weight"),
     ),
     "det_gemm": OperatorSpec(
         name="det_gemm",
         op_class="reduction",
-        gold_path="rl_engine.kernels.ops.pytorch.matmul.det_gemm.NativeGemmOp",
+        # The deterministic GEMM rounds every leaf and merge node to BF16, so
+        # the accuracy gold must be the same leaf-space tree, not the
+        # single-rounding torch.matmul (which fails structurally at
+        # near-cancellation outputs on random inputs).
+        gold_path="rl_engine.kernels.ops.pytorch.matmul.det_gemm.DetGemmTreeReferenceOp",
         gold_method="__call__",
         candidate_paths={
             "pytorch": "rl_engine.kernels.ops.pytorch.matmul.det_gemm.NativeGemmOp",
             "cuda": "rl_engine.kernels.ops.cuda.matmul.det_gemm.DetGemmOp",
             "triton": "rl_engine.kernels.ops.triton.matmul.det_gemm.TritonDetGemmOp",
+            "ascend": "rl_engine.kernels.ops.ascend.matmul.det_gemm.DetGemmAscendOp",
         },
         grad_input_names=("a", "b"),
     ),
@@ -163,6 +197,7 @@ OP_SPECS = {
             "pytorch": "rl_engine.kernels.ops.pytorch.rotary_embedding.rope.NativeRoPEOp",
             "triton": "rl_engine.kernels.ops.triton.rotary_embedding.rope.TritonRoPEOp",
             "cuda-sm90": "rl_engine.kernels.ops.cuda.rotary_embedding.rope.RoPESM90Op",
+            "ascend": "rl_engine.kernels.ops.ascend.rotary_embedding.rope.RoPEAscendOp",
         },
         grad_input_names=("x",),
     ),
@@ -175,6 +210,7 @@ OP_SPECS = {
             "pytorch": "rl_engine.kernels.ops.pytorch.activation.swiglu.NativeSiLUOp",
             "triton": "rl_engine.kernels.ops.triton.activation.swiglu.TritonSiLUOp",
             "cuda": "rl_engine.kernels.ops.cuda.activation.swiglu.SiLUCudaOp",
+            "ascend": "rl_engine.kernels.ops.ascend.activation.silu.SiLUAscendOp",
         },
         grad_input_names=("x",),
     ),
@@ -187,6 +223,7 @@ OP_SPECS = {
             "pytorch": "rl_engine.kernels.ops.pytorch.activation.swiglu.NativeSwiGLUOp",
             "triton": "rl_engine.kernels.ops.triton.activation.swiglu.TritonSwiGLUOp",
             "cuda": "rl_engine.kernels.ops.cuda.activation.swiglu.SwiGLUCudaOp",
+            "ascend": "rl_engine.kernels.ops.ascend.activation.swiglu.SwiGLUAscendOp",
         },
         grad_input_names=("gate", "up"),
     ),
@@ -241,6 +278,26 @@ class GtestPackOp:
     def forward_fp32(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         packed, _cu_seqlens = self._op(x.float(), mask)
         return packed
+
+
+class GtestPrefixSharedAttentionOp:
+    """gtest view of the prefix-shared layout: expand the shared K/V over the
+    G groups and reuse the standard fp32 attention reference (non-causal,
+    default scale), which is the gold for the CUDA/Ascend prefix-shared ops.
+    """
+
+    op_class = "attention"
+
+    def __init__(self) -> None:
+        from rl_engine.kernels.ops.pytorch.attention.standard_attn import NativeAttentionOp
+
+        self._op = NativeAttentionOp()
+
+    def __call__(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+        return self._op(q, k.unsqueeze(1), v.unsqueeze(1), causal=False)
+
+    def forward_fp32(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+        return self._op.forward_fp32(q, k.unsqueeze(1), v.unsqueeze(1), causal=False)
 
 
 class _LogpSM90CandidateAdapter:

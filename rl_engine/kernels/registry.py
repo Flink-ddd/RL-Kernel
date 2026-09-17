@@ -109,6 +109,7 @@ class OpBackend(Enum, metaclass=_KernelEnumMeta):
     # Batch-invariant deterministic GEMM (WS1 #146)
     CUDA_DET_GEMM = "rl_engine.kernels.ops.cuda.matmul.det_gemm.DetGemmOp"
     TRITON_DET_GEMM = "rl_engine.kernels.ops.triton.matmul.det_gemm.TritonDetGemmOp"
+    ASCEND_DET_GEMM = "rl_engine.kernels.ops.ascend.matmul.det_gemm.DetGemmAscendOp"
     # NON-deterministic reference (torch.matmul); reference/benchmark ONLY,
     # intentionally excluded from det_gemm dispatch (cuBLAS breaks invariance).
     PYTORCH_GEMM = "rl_engine.kernels.ops.pytorch.matmul.det_gemm.NativeGemmOp"
@@ -125,6 +126,13 @@ class OpBackend(Enum, metaclass=_KernelEnumMeta):
     ASCEND_BATCH_INVARIANT_LOGP = (
         "rl_engine.kernels.ops.ascend.loss.batch_invariant_logp.BatchInvariantLogpAscendOp"
     )
+    ASCEND_RMS_NORM = "rl_engine.kernels.ops.ascend.norm.rmsnorm.RMSNormAscendOp"
+    ASCEND_EMBEDDING = "rl_engine.kernels.ops.ascend.linear.embedding.AscendEmbeddingOp"
+    ASCEND_FUSED_LOGP = "rl_engine.kernels.ops.ascend.loss.logp.FusedLogpAscendOp"
+    ASCEND_LM_HEAD = "rl_engine.kernels.ops.ascend.linear.lm_head.AscendLMHeadOp"
+    ASCEND_FUSED_LINEAR_LOGP = (
+        "rl_engine.kernels.ops.ascend.loss.linear_logp.FusedLinearLogpAscendOp"
+    )
     # Deterministic vocab-parallel TP logprob reference (WS2 #241 PR3)
     PYTORCH_VOCAB_PARALLEL_LOGP = (
         "rl_engine.kernels.ops.pytorch.loss.vocab_parallel_logp.VocabParallelLogprobOp"
@@ -138,6 +146,11 @@ class OpBackend(Enum, metaclass=_KernelEnumMeta):
     # Deterministic GRPO loss on the TP-aware logprob path (WS2 #241 PR5)
     PYTORCH_DISTRIBUTED_GRPO_LOSS = (
         "rl_engine.kernels.ops.pytorch.loss.distributed_grpo_loss.DistributedGRPOLossOp"
+    )
+    # Ascend NPU deterministic (batch-invariant, no split-K) standard-softmax
+    # attention (issue #147); Ascend C forward + reference backward.
+    ASCEND_DETERMINISTIC_ATTENTION = (
+        "rl_engine.kernels.ops.ascend.attention.deterministic_attn.DeterministicAttentionAscendOp"
     )
 
     # RMSNorm(pre-norm / QK-Norm) - pure Pytorch reference(ws1 ground-truth)
@@ -153,10 +166,13 @@ class OpBackend(Enum, metaclass=_KernelEnumMeta):
     PYTORCH_NATIVE_ROPE = "rl_engine.kernels.ops.pytorch.rotary_embedding.rope.NativeRoPEOp"
     TRITON_ROPE = "rl_engine.kernels.ops.triton.rotary_embedding.rope.TritonRoPEOp"
     CUDA_ROPE_SM90 = "rl_engine.kernels.ops.cuda.rotary_embedding.rope.RoPESM90Op"
+    ASCEND_ROPE = "rl_engine.kernels.ops.ascend.rotary_embedding.rope.RoPEAscendOp"
     PYTORCH_NATIVE_SILU = "rl_engine.kernels.ops.pytorch.activation.swiglu.NativeSiLUOp"
     PYTORCH_NATIVE_SWIGLU = "rl_engine.kernels.ops.pytorch.activation.swiglu.NativeSwiGLUOp"
     CUDA_SILU = "rl_engine.kernels.ops.cuda.activation.swiglu.SiLUCudaOp"
     CUDA_SWIGLU = "rl_engine.kernels.ops.cuda.activation.swiglu.SwiGLUCudaOp"
+    ASCEND_SWIGLU = "rl_engine.kernels.ops.ascend.activation.swiglu.SwiGLUAscendOp"
+    ASCEND_SILU = "rl_engine.kernels.ops.ascend.activation.silu.SiLUAscendOp"
     TRITON_SILU = "rl_engine.kernels.ops.triton.activation.swiglu.TritonSiLUOp"
     TRITON_SWIGLU = "rl_engine.kernels.ops.triton.activation.swiglu.TritonSwiGLUOp"
 
@@ -703,15 +719,67 @@ class KernelRegistry:
                 "silu": [OpBackend.PYTORCH_NATIVE_SILU],
                 "swiglu": [OpBackend.PYTORCH_NATIVE_SWIGLU],
             },
+            # Ascend NPU: op types without an entry fall back to their CPU
+            # candidates (see the runtime override below), so only
+            # Ascend-accelerated ops are listed.
+            "npu": {
+                "batch_invariant_logp": [
+                    OpBackend.ASCEND_BATCH_INVARIANT_LOGP,
+                    OpBackend.PYTORCH_BATCH_INVARIANT_LOGP,
+                ],
+                "attention": [
+                    OpBackend.ASCEND_DETERMINISTIC_ATTENTION,
+                    OpBackend.PYTORCH_NATIVE_ATTENTION,
+                ],
+            },
         }
         # Preserve the former CPU fallback behavior for every operator on NPU,
-        # then override only the operator with an Ascend-specific backend.
+        # then override only the operators with an Ascend-specific backend.
         self._priority_map["npu"] = {
             op_type: candidates.copy() for op_type, candidates in self._priority_map["cpu"].items()
         }
         self._priority_map["npu"]["batch_invariant_logp"] = [
             OpBackend.ASCEND_BATCH_INVARIANT_LOGP,
             OpBackend.PYTORCH_BATCH_INVARIANT_LOGP,
+        ]
+        self._priority_map["npu"]["rope"] = [
+            OpBackend.ASCEND_ROPE,
+            OpBackend.PYTORCH_NATIVE_ROPE,
+        ]
+        self._priority_map["npu"]["attention"] = [
+            OpBackend.ASCEND_DETERMINISTIC_ATTENTION,
+            OpBackend.PYTORCH_NATIVE_ATTENTION,
+        ]
+        self._priority_map["npu"]["rms_norm"] = [
+            OpBackend.ASCEND_RMS_NORM,
+            OpBackend.PYTORCH_NATIVE_RMS_NORM,
+        ]
+        self._priority_map["npu"]["embedding"] = [
+            OpBackend.ASCEND_EMBEDDING,
+            OpBackend.PYTORCH_NATIVE_EMBEDDING,
+        ]
+        self._priority_map["npu"]["logp"] = [
+            OpBackend.ASCEND_FUSED_LOGP,
+            OpBackend.PYTORCH_NATIVE,
+        ]
+        self._priority_map["npu"]["lm_head"] = [
+            OpBackend.ASCEND_LM_HEAD,
+            OpBackend.PYTORCH_NATIVE_LM_HEAD,
+        ]
+        self._priority_map["npu"]["linear_logp"] = [
+            OpBackend.ASCEND_FUSED_LINEAR_LOGP,
+            OpBackend.PYTORCH_LINEAR_LOGP,
+        ]
+        self._priority_map["npu"]["swiglu"] = [
+            OpBackend.ASCEND_SWIGLU,
+            OpBackend.PYTORCH_NATIVE_SWIGLU,
+        ]
+        self._priority_map["npu"]["silu"] = [
+            OpBackend.ASCEND_SILU,
+            OpBackend.PYTORCH_NATIVE_SILU,
+        ]
+        self._priority_map["npu"]["det_gemm"] = [
+            OpBackend.ASCEND_DET_GEMM,
         ]
         logger.info(f"KernelRegistry initialized for {device_ctx.device_type}")
         self._adjust_priority_for_hardware()
