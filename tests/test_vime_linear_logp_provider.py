@@ -254,11 +254,39 @@ def test_megatron_adapter_forwards_structured_context(monkeypatch):
     assert result.logp.shape == (3, 1)
 
 
-def test_provider_rejects_top_p_replay_without_changing_its_semantics():
-    request = _request(keep_mask=torch.ones((3, 8), dtype=torch.bool))
+def test_provider_replays_top_p_mask_on_reused_local_logits(monkeypatch):
+    monkeypatch.setenv("VIME_RL_KERNEL_STRICT", "1")
 
-    with pytest.raises(LinearLogpProviderUnavailable, match="top-p replay"):
-        provider(request)
+    class FakeLinearLogp:
+        backend_id = "fake-linear-logp"
+        provenance = {"actual_backend": "fake-linear-logp"}
+
+        def from_local_logits(self, local_logits, target_ids, **_kwargs):
+            return torch.log_softmax(local_logits[:, :7], dim=-1)[
+                torch.arange(target_ids.size(0)), target_ids
+            ]
+
+    import rl_engine.integrations.vime.linear_logp_provider as provider_module
+
+    monkeypatch.setattr(provider_module, "_default_strict_linear_logp", lambda: FakeLinearLogp())
+    request = _structural_request()
+    request.context.reuse_local_logits = True
+    request.context.local_logits = request.logits
+    request.log_prob_keep_mask = torch.tensor(
+        [
+            [True, False, True, False, False, False, False, False],
+            [False, True, False, False, False, True, False, False],
+            [True, True, False, False, False, False, False, False],
+        ]
+    )
+
+    result = provider(request)
+    masked = request.logits.masked_fill(~request.log_prob_keep_mask, float("-inf"))
+    expected = torch.log_softmax(masked[:, :7], dim=-1)[
+        torch.arange(request.target_ids.size(0)), request.target_ids
+    ]
+
+    torch.testing.assert_close(result.logp.squeeze(-1), expected)
 
 
 def test_provider_rejects_local_vocab_metadata_that_cannot_describe_tp_ownership():
