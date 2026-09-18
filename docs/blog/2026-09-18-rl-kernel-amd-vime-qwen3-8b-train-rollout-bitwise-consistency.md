@@ -4,7 +4,7 @@ By the RL-Kernel Team
 
 On-policy RL assumes that the rollout engine and the training engine evaluate the same policy before a parameter update. In practice, however, generation and training are usually handled by separate engines. Identical models, weights, and inputs do not guarantee identical execution paths: kernels, batch shapes, parallel layouts, reduction order, and intermediate precision can all affect token probabilities, ultimately leading to train-rollout mismatch.
 
-vime and RL-Kernel address two sides of this problem. vime manages the lifecycle of tokens, state, and weight versions; RL-Kernel aligns reduction and rounding boundaries across RMSNorm, Attention, GEMM, SwiGLU, linear logp, and distributed collectives. vime keeps both engines on the same training timeline; RL-Kernel ensures that they follow the same numerical execution contract.
+[vime](https://github.com/vllm-project/vime) and [RL-Kernel](https://github.com/RL-Align/RL-Kernel/) address two sides of this problem. vime manages the lifecycle of tokens, state, and weight versions; RL-Kernel aligns reduction and rounding boundaries across RMSNorm, Attention, GEMM, SwiGLU, linear logp, and distributed collectives. vime keeps both engines on the same training timeline; RL-Kernel ensures that they follow the same numerical execution contract.
 
 ## Introduction
 
@@ -36,35 +36,57 @@ The underlying principle is:
 
 The rollout engine generates token aₜ given prefix hₜ and records
 
-![][image1]
+$$
+\ell_t^{\mathrm{R}} = \log \mu(a_t \mid h_t).
+$$
 
 Before training begins, the training engine rescores the token using the same weight version:
 
-![][image2]
+$$
+\ell_t^{\mathrm{T}} = \log q(a_t \mid h_t).
+$$
 
 If the policy has not yet been updated and both engines are indeed computing the same logical object, the importance ratio should satisfy:
 
-![][image3]
+$$
+\rho_t = \frac{q_t}{\mu_t}
+= \exp\!\left(\ell_t^{\mathrm{T}} - \ell_t^{\mathrm{R}}\right) = 1.
+$$
 
 Let δₜ = ℓₜᵀ − ℓₜᴿ. When δₜ is small, ρₜ ≈ 1 + δₜ. This difference also enters the clipped objective in PPO and GRPO:
 
-![][image4]
+$$
+J_t = \min\!\left(
+\rho_t \widehat{A}_t,
+\operatorname{clip}\!\left(\rho_t, 1 - \epsilon_{\mathrm{low}}, 1 + \epsilon_{\mathrm{high}}\right)
+\widehat{A}_t
+\right).
+$$
 
 Here, Âₜ is the advantage estimate. If δₜ exceeds log(1 + εhigh) or falls below log(1 − εlow), the mismatch can even change which clipping branch is taken. It creates an apparent policy shift before any parameter update.
 
 We can further decompose this total error. Let sₜᴾ and sₜᴰ denote the probabilities assigned to the same token by serving prefill and an independent decode replay, respectively. Then
 
-![][image5]
+$$
+\frac{q_t}{\mu_t}
+= \frac{q_t}{s_t^{\mathrm{P}}}
+\times \frac{s_t^{\mathrm{P}}}{s_t^{\mathrm{D}}}
+\times \frac{s_t^{\mathrm{D}}}{\mu_t}.
+$$
 
 The first term compares training scoring with serving prefill; the second compares prefill with decode; and the third checks the weight version, cache state, and record identity. This decomposition matters: although the final ratio is a single quantity, it spans three interfaces involving cross-engine arithmetic, the two inference paths, and system state. If any of these is not held fixed, we should not loosely attribute the total difference to a kernel error.
 
 At its core, the problem comes down to the non-associativity of floating-point addition. Consider BF16 with round-to-nearest-even:
 
-![][image6]
+$$
+\operatorname{fl}\!\left(\operatorname{fl}(1 + 2^{-8}) + 2^{-8}\right) = 1,
+$$
 
 whereas
 
-![][image7]
+$$
+\operatorname{fl}\!\left(1 + \operatorname{fl}(2^{-8} + 2^{-8})\right) = 1 + 2^{-7}.
+$$
 
 In real arithmetic, these expressions differ only in their parentheses. In BF16, they produce different answers. Training is designed around packed sequences, backpropagation, and multi-GPU parallelism; inference is designed around prefill, decode, dynamic batching, and the KV cache. Even with shared parameters, these different objectives can lead the engines to choose different partitions, reduction orders, and intermediate precision.
 
@@ -536,20 +558,6 @@ Ryan Huang:
 * Contributed to development of the standalone Logprob operator and the distributed implementation PRs.
 
 Finally, we thank our community contributors: Xiaopeng Du, Yuepeng Pan, Yiyang Fei, Ziying Tao, Zhifu Liu, Zhengtao Chen, Mengjie Li, Zien Liu, GitHub: haoruilee, GitHub: luoyueyuguang, GitHub: hongleng, GitHub: smarslou.
-
-[image1]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHkAAAAYCAIAAABRMMXhAAACdUlEQVR4Xu2XvZUqMQyFt6fpgRaogRJogQ7ogAq2AQogJyYlJCHweffMPasjJMs/zDJvA3+RRzayfW1J5isN1uLLGgYfY2i9HkPr9ejQ+lth+wYNdGgNpmkyjUE772t9vV5fO/8Ej8fDmhp4Pp/W1MZ+v7emmLrWcKclvt1ux+Nxs9m8jupjmrHWxUCyrs0L2JQ1zbSsc7vdWlNARWtcE6z+crnwkxPjs7qCKss9eN72GWmdGnzudjtrCqhozZn0vTaNt1nuwXA4HAqSlYl+iFdAyzobr3ZJa2RkzITAZGpmQHFu5BBkkiUPEr2H+/2OT3NBEE+n0ynlagNklbaswYsCt8x11XQcaQ2f5/MZO9UzevzUWUpaw0XjwRIkHDkPg9/t9ONWZ38xmoapeNLLGY2RXGZoN12egtb8LY6tUHWr/klF64U1sEBWI9xl7Ao7z/YSRhvbCF4phmak9qDjL1s8C1qzgWPTY4wTv8gsFa2t6ffIqglRuI1sr1gkonWvbiPwIw/eYQq01jFddpL16Qm1Rvb0LrxFw7SbpZBDpJHmSeEkzYmFF1y6BD0+apt3appTPLUDcC4jSTSRKQZM3HSC49QjpV0g1Dr9uGBc85PYcf0g9uFHhz8yAyqhOJe5ACukID9kb1Qb2eUn0mOESGvdlk/vRCzl13BJ6zRfVWnD0Tr/FSGuvnp69fo8DFieORVP9Nus1hHeSeN7rKK1xs/xIZBJ9ObN/dLBa6iucHqtk0KX1nzvyme22Gbp1tonu0/AakEi3T2oCu8tr0trQ/tTrUNrXKhqkP53dNJrx5fuRtovderSerCQofV6DK3XY2i9Hv8AeGz6Tc6mUQgAAAAASUVORK5CYII=>
-
-[image2]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHYAAAAYCAIAAACgO55sAAACZklEQVR4Xu2YwZHCMAxFt6f0QAupgRJogQ7oIBXQAAVw58yVIxcOnv3rv2iEZMdOQgYOfgfGkYVkf8tisz+hsTI/1tB4N03i1WkSr84EiTuH9WikmCDxMAz4PB6Pu90uRMWtRyPFBImJSEzFv4d5R47tWFMF5/P5drtZa4ayxJvNRq9eJF7C2/vM7GhJibm8w+FgJxSQxZoyFCTmCt4ucVggigf36Xq9WmsdSYlD3fJqfEJRYkbR5/mFEi8J9WGJ0W4Qpe97sfAGEeU4Bx0BR4jH0+kkFlTldru93+/7/d7nQivUp+4dEKrypyIp8eVyQUx86r17jhFrdYxJjDRDxE5kwM53Gayr0gWDx+MRnieKAWRlp+sjZhv6i0F9K+nAyCMkNfqroNcsOcZnSUHimhDzYGSor1NwjE/uHLVsFoBHabucMo0LZ4Pa1w5+rMlJXBznLJ6CxMZSX9FFGNz8uSJjStm5MhQHKV62FO/Ay+7thnGJTZvyQbzFk5W4i3ijscyGocw151hLZhBnnI0Ur4/AAQSS16XueTMMSaMOgjvB9cATSbW/XvxI8WUlDs9MOh95cZoFOiwlCFFQ7gEWdHM6SC6Trot7ZnFJgWsf6A4HxIcc2LZMoajFR+MlxrXQy2A6PprXDdjlJ7qLP496VhiTOMR8MkYIyb0qWjIWoJr8RxuTDhrpzh4vcQ6vYDEvKUisqYy4HF+5+jG49gIFx9/EqKPXKEyRmH1JF3LlC95kiZN/gb2dTlEzVblbT73EBr+wHBMkRmsbL5bPMu/s6/+bo9FvSUUmSNyYR5N4dZrEq9MkXp1fGWUzRcbpCjkAAAAASUVORK5CYII=>
-
-[image3]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAALUAAAAjCAIAAABdDtygAAADYElEQVR4Xu2au5HjMAyGtyf24BZcg0tQC+rAHbgCN6ACnDtWuqETB5zDEEccFhRhvWxwb/AFHgqk+AB/PuWv6Dh1vqTBcRiuD0fD9eFoGOvjcrmEEE6nU9d1Ms5pAEt9HA4HlMX5fAaVyGinASz1QZro+57CLpSmaEIfELjf78LYOKFAplgFzxCmVRn9ccz08Xw+YfOBYXTuOI47OnovavU5Ho8x1znWk62AsrrdbhTeMf9FmOkj5jZzTaDT2wF2SKBjaU2AMvAXK3+9XmWKtZA3hmHgsjCRiKU+gO/vb745NXGBQlkfUAw3kj42AssrqAHDOGBCOtbxNDB4UJTboZn7Jcb6iMkdNEYh3M5Bt+x4qBt05O76gObzTCjMPSOiVlM2QcdYH11GRjRA6US08G3jLvpAHZATuD5goD8eD56SwluYn89rfYREbRluGfA4Vh5djOGQpigMkBFXDbQQ4hGlwP1A4t6obywI6hCLAYN14yl3WWJE0xRe6IMy0nNE504ik24D9iuygAwfZzE5mjwbWCtgdoU+5ks7xYqJl4fx8R33eFjozGwhWd/30lr3P9cWJ8wrLur6gA2ROILGLPMtyEaoyJdnE1J3XhM8nzJbETsZxsdF9fk3t/xEJAMnz8827LQ/m1+ipg/KpYWD+FJCZSouu5k/8reUZAhMZsKyglDMfDHtWIUFaVQfId9vdmnlLqs41hEptyMLyIhkoTgfxnRLgYeFyfVFD5c+LS1LmVywSvcSkHjyokX6IlMqDxGFwvjnj5yqPsCD5a4NKrfLoPkMqOaQTgGR9TEGQvY1hst5XjwOw8C/E9WGygqw9DFJXM9WVGkFf1ueAQtoSMm2qg94p5QCZlSr/S+l5p2aHYHupButfVHKVaLehKYPaUrGFj4a7ctkS2OadcsViqi9tRGQ3eQKEtN2Z/vhYCnL9PH/gQec2oyoOAGjan25GqzJZLmTxndT1ccH4A02afxLYDP7+U+Gk5vKISGt76cJfYgPEE1RbsJMsFrWm9AHjNHagdOxxUwffCMmBEH/JXPMMdNH+PlZP+Y/BzUynzuIpT5CuqGClSWwC83PH+EcBUt9SFOiZndMsNHHWP9bDc4r0uoYYaOPruusDmzOImz04fwWXB+OhuvD0XB9OBp/AO231JHXEgd9AAAAAElFTkSuQmCC>
-
-[image4]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAREAAAAhCAIAAABx+wjAAAAFT0lEQVR4Xu2awXXzIAzHuxM7dIXMkBGyQjfIBp0gC3SA3nvutcdeeuB9Kv9nVZEAC9v9Evfpd8jDAoPA+gPGechBEIzwoA1BEHQJzQTBGKGZIBjjL2jm9fVVm4LAweVy0SYHu9dMSkmbgsDH19fX8XjU1jn2rZk1gqF7D4eDtgZ/jsfHx06ckGyogLZ22bFmKOLf39+11cH5fMYgvr29UeL5+VmXCP4EFB70fD8+PnKZIlva6Ciqyo41M9pVYO9aMNME9w8JhuZEZaw+aAoAGxUd9qqZp6enav+DYAEba4aWtvcJnXc7qJM0PWjrIEMjJfn8/LxcLlj0/Sw7pQlmocjsn53OPmgqQLOwtjaY10ye9v3a+jukgrYaPGX6OBtqcTqdMImQcjz1eMp0IJXSQ11Zybag43fiUscNz7gNRbhLM/2Th21xrh4r/aFw9wxlB7nw9ic5sKYtZpNKNsSjmdkCW0HTijYVnNHrKQNcmqHqzueztt4O2uT4e1iFbsehis5wM7RZPR6P/sId1jj8G9yVZqoN8aGZzjB4ygCvZrRpERhi2tXQL+KeuoRLTNUwojkkSKuHwyFdbzdxC19KUjk7buUqnMXytA95eXlJRWxZaIYd5nQq3srKqw2lEVfBUOEqcG+r43XUpq3X9AvgzKpfxkm1EhjTdOLcoXp7lW00c2mjSspwT+LInI0XsYakKUBlAaSrLrGRv8BUkfVf5zThkuQwOiXXGeUbEjQLdBpiy1D42nr80NZF3o6ZSOQvoTyHmUo6BdRbhK2NJil5CVoVWjvPs6nMd9eZGnt7i2HN+KuuojTDomKj0gwSNm3dkDHKW9i3giyGLRkjs2ydjM2a1YxMq9ulqxS72IiTn8ueK7+LK9S/HGQWW2SBBcjarN2izqZkFltUAXnZMeaaXdZPgcf26v9l7O0tmprhKij+OOwQ0Hb1kM4pVEmlGRt2izVDFn4LRBrTmHpOcuykA2i39R5pm1ujmSS2CshC67PHndYNP/ZetsidJHlCkp52Cd/83GBIBW29plPAZqWyIOAZ0WaBg5uMtCCTn3im+AytjovsIMu07GCq7U6tMy3qmpHruKyLvFx5GKA0w2pUXVJGm7Y9TNMXG/m5UxWzlxwTFCjsjN3aJXEKgspnNSOPa2xtECfVWXW12kHYtckNNaTWMdTGyxEu8ftayNM7NOzcX6blp6RTgMdBWpCAbHDJ0xwkxHepmuUlr96cJXOrLklj//tBXTN5euSqV9VFzQ8qZKi2NJ1foTkaHeotN80CS2WngXSunZuhk7DLk18OCLQCYOFLRC3bc+PfNHAAFVJDcBIt2pe0dL1oUDGOV8xHOE6QQSxbpC4oB9A0GrKx6wS3K5Wy56fyxQl/9f0el2v30Dpf5nLjqcA1VOnnYqz4kUln+JJyadDINyUVVbPsF1CXsFA91T0wlwed/+82NVMF9arab4LtYbWTpCXnwqgqtGu3k9bgsJ0i0gqSREXPUjbaqmdD1NOUier3ymqozWI724FblJpRT9A6nIsSON0Hd1mv/AM+phnMQNp6C5QbqfFXmpbdokLEjqkHnB1Xnx8v0clsSPJ05MquUmJZgPpBf9FlJNht9J2clEO3bECGYJcUao8gcn7e7JHlofrJ3+5cOoxp5n5I1yfus2/P9wDCbheu3hUczbw9U6x8ZcilCc+fOcBeNSOPa4M/D0727H/7t2IolvaqmTzYzyBoUd2tddixZmipUSc5QbCAIcHkXWsmj/c2CBTyM4CTfWsmh2yCdSw4D9y9ZoLgPxOaCYIxQjNBMEZoJgjGCM0EwRj/ACeO82fJA5eMAAAAAElFTkSuQmCC>
-
-[image5]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAJAAAAAsCAIAAAAFLKbhAAADj0lEQVR4Xu2bzZGrMBCENydycArE4BCcAhk4A0dAAgTgu8+++uiLD6qdpc3UeGxAghkMW/oOLq2g1E9qafSD3k/IbIofnZFZN9mwjZEN2xjZsD/qui4E+rEpUqssS/14jGzYE2rHw+GAtLdnsvxUrWzYk28ZRrq73U48HCEb9oQabr/fX69Xsu12u+nHpkjD7vd7Uv/Ihj2RI8wb6RB1kWzYFL5lGKUfj4d4OEKsYd5RQkH9jn6TapIKtdTlckHbkRxNJJQ+n8/6PQuUFiUOLZRATeOJMgxKqJJ+Zg2poNVctaiZaMYKziqAJUy0xg1jGTk9Og24qqreq+cxzlAXkxYcBUJWWgmGUeJ0OqlMW2SxUpczrcDwaprmo6IhFC0Q9CjB5VN3pynz5b1o0gzjBJG0e4iEJbgpoWXblDyOqRFlw3ksOopulpJac5ou1jA5gR2PR48wFTotKrzoRjPFLh7WhqAT0EIAf1KiLEtqUJJ7fXEuHHt5OYPVh+MIC62GHNGc8ABNxhITTtum4VopxRytKMNCq6EmsNT1aBKqc3gEK8WcRkxlTsyIMgyDmsDi8N6iXzKClgMshxzXnsGQHIV6nesDYr7OjSPKsPVDfZYnpNDOsk4bj9BNEDLHabv9ES/D6h6cViuhNYkTfm4BcojlJo+VaXgZ9hUQ1rzdAvBsYbfCvzRsmQAFof9j2LUH/Z4dOLwIXVO+PjRGSnh4JudjhZdhC6O+OvKBkAc0E3svOor+7warNqz+xmf7pmn8zJ7P2g2ruyOcxQxT6bWRDXuSDTOg7i7G+B2sMMow8/1i35yUyrhh8lvAwl1PzmHeuI6wq7hpw6vZaYwbxkp8KwF49Hpcc2AVV8MgxOsLKWq+9abCq6ri9OvDNBIMK8QHJJlvBQUNjGbzkt+BhGuHkMga9aUjGTGsbi+CI40E/xbd4b0VOMMmZgaNGCCEuiwAC+FwhO//TPg3jBjGJfIXZ0ye9DuwG58G7Ff3LFxHQCFCInUXjyAf3jq9/Haf6laIMSyIkxJOTFAa5uN9KZW2ouhiuyx8zj2LYUgFm3GsPLmLUOaETh9l2Dt9+XMo2v9+o9xCbcVbBvDShkM6/pTShvQVi/y+p30MGaaik8QvgEj61D3w0xooecLmbMiwrzNQVVuc7mZ5sHbDzE8cPoK7WYv1jzms2jD10cSVBfYSJqzasMw72bCNkQ3bGNmwjfELoyZX9eGodlkAAAAASUVORK5CYII=>
-
-[image6]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAJ0AAAAZCAIAAACkZbtPAAACn0lEQVR4Xu2YzZHCMAyFtyf3QAvUQAlpgQ7ogApogAK4c+bKkQsHz76JJlpFdhThQMJm/B0YR5b/9CzH4SdW1siPNlRWQdV1nVRd18lqdd1sNpfLRVs/z/P5DCE8Hg9dMS/lumL22vQ1QFQqzB/f6/WK3+PxSI9LRalQ12eLtuZYZGEY9H6/3243miTKs+UurXe73SrLzFi6Ytfv9/vQIavSRwQxdeO8YSYusmka9HA4HHRFgprMbrdzbsQhIJVn8ufzGW4Yji14nDg0k8ZzCEtXWgaCeDqdUiFlGQ6xPXxsN0xrNDSGZtxWatYkxC5dEFwZCHtoO/RyaDam4wLsb3KjQuzeuNyqDGf0mHFdgdI1dELyI69BuXGZaNpsU0aF4YAqZAOX+5U9WE55/OLs4XIKLyGFjiIqh5Z+/R+QkPpR73WjyUv4+xnUlRZAHaW6pm5kHHIjJuoqsd0QVjgoIe2MNHSVoFtOzSwUK7o9MfZs/fj7GdQ1il4MXelxnnxlQv8F5kceMwq/rtrkQIZI2bPwdVoR3KN/ha5/C+qTzQy8gP3XB0WawXrIDunGDNlHCf03VzH+CXyFrhLbAQMZF6tRjOBm80mCEwLfS9HsZIiQnMxl2MGR/CddkV4sapm6hnhGVWyH49ez/DZ1Et70D5QKjvFRntcVG5M+16AEfb1QmWqlkCSV9ERD2tdqEtKTHLKoVhJqzujqMfguncXQFbOV45blqza9CIJG3zlNS+yiof068rra4EgxemSwQwuyytNzGXbPhq7TsYcuxthhJbpG90SdbjOAUzR7C5sB+mNHW9+BEd5CXf0TLb67vhcjBJ9mkaELdY0LTfffgduG/X/IhyjXNbYXCm2q9FkqRJN0rXwtVdd1UnVdJ1XXdfILIi11n3CysogAAAAASUVORK5CYII=>
-
-[image7]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAMEAAAAZCAIAAAAHTd2JAAADD0lEQVR4Xu2ZwZGrMAyGtyf3kBZSQ0pIC+kgHaSCNJACcs+Za4655ODZf9CsVithI2zg8Xb9HTIgjCTk38YmH7HRqONDGxqNiTQNNWppGmrU8ps1dL/ftanh43g8alOaKg11XadNm+H1euE3hKAvzA0V4f1+6ws99x5t3Tzhi/1+r68ZyjW0Qvcwu91Om7I8Ho/D4RBXSRK5IVzsg+L3+XwqPa2Qw+yQ7vEs+sIQIxrC86NGJElpP5/P1+tVWupBiNPpRLGkcyWg2+3mmf/IT2p68IAKXi4XjweqEp9axc8oo8pZDaXzdxyNw1FyGqInp9lMVUGeUm9Vlgm3o88wlEmy8jnldEpRZDhIihNgOyr17OFmU0Ea/DZkTahA4Wd9bJ6p0wJQEIo4aaWiwMinA/jB8OBjBdm5wSjjGrLHg31jLZNQsVhD0o5O4lPZxsKFzo/azHyWysHCV2Xv4lg6Rxp5J06CQ0OZBpwDchvNZ7QBk9RQ+IJykh5hsUstf0gLxyInId1//GaBndYfKchbRmcxqyG5FFA5KJASZ66M0pJ34iTUaYirh9KN5jPagElqKP70oo5t3/hDDpLyP+jWM4w8ZDTE0LtVWx14NMRrTYtu2hPqNMTAj3Ot42FZDUH4XQLVMuV/0O2g0YnMgZbnxOAeBEui4ljqxmI/kpSGxDN1EAcfD24IsCqyq/4altWQn5R/69a+RovpjJQVNrqfNTUkyTfAUJlxBiIKNWQX7ZU1cmoIm38eW5hF5KUC8hriwZpfmKfwaAjrkmsC3bSnXkO8NZs6FGmXOkhSQ12/5qD58NpvLLniEJCsCE2bsDi/3FjodnQVu8JYoZeLDES7G+b7/lIy2cpABbHgWXVSgRMJrQpC/6Ehk3bMaqjmoYIQgCKpoTxTMyhm6nCZRKoo9aj6oF95AliajIYWYusaiuvGmguV8//4CH4KNYSpddEZQoKX2nITxhIoxdhvRb+MQg1FU6lFGdx4bxO7nV6zUP+Ecg1F939yf5l5v8RskyoNNRqxaahRT9NQo5amoUYtn0gDyTVeNaojAAAAAElFTkSuQmCC>
 
 [image8]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAGkAAAAWCAIAAABMlCV5AAACIElEQVR4Xu2WwZHCMAxF6ck90AI1UEJaoAM6oII0QAHcOefKkQsHz/7xn2i0smW8ZjewM3kHJpEdWfqSbTZxpZeNNaw0s2rXz6pdP5+i3fV6taZ3MAyDNfkspF0ooUfV3B9g/HTTF8xC2sUsJnk9Ho/a3sg0TeKhPdsiu92ONTidTni93+/7/d5OKvE27SS+vszlq9vt1ueB4NvtdpsbjaVITTu4QBH4zJp0c7lcTJsgZ/0qYCEmg4dK/eWrw+FQSfXxeKCt6n4wJzcaSxFXOyQAp/SiMyfS5zl6msAh5IBfeBO76Rq45QOMlYbihhXyxiESv+cnzv0Bh9rYeGO42sXkl17CfBZ0Ix5MntBRBzqOIx+Y7fl8liENJJZsQ6lxCFvylrBjM8wRv/qilzDqPNHOPHTjuULEeZGRs9dKRJygZeqxhRk7kPA0/VvtkN7gYGbG0pYXZFsRuI1pObaVl4MOzPtjqLe8t7pnL2aR81y7yrnTSKXy8XsCIZ0+Yd6G+i6mrIT9gpLo9jSrjImYelOmGT9hLpJB/FSqHuvaxVQBBPrKYTcp7FhCB4e1eJNgRX2l5HsTE+Q/gGDm4LiEUnpa7oeKyx0lRnmuRO5qF+btUBH+V/A2pkFL6WEkKJL74caSNM1/43y+UNOOh9ErTdfI05xb6le/Xkjuh0qhfnKn542pXzWudgvjXXkL07gJyKdo9x9Ztetn1a6fVbt+vgCFV1Xvz30uiwAAAABJRU5ErkJggg==>
 
