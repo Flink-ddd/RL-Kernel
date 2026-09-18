@@ -35,8 +35,10 @@ def _args(tmp_path: Path, mode: str):
 
 
 def test_user_modes_map_to_operator_arms():
-    assert canonical_arm("native") == "G00"
-    assert canonical_arm("consistency") == "G01"
+    assert canonical_arm("native") == "native"
+    assert canonical_arm("consistency") == "consistency"
+    assert canonical_arm("G00") == "native"
+    assert canonical_arm("G01") == "consistency"
     assert _arm_config(_profile(), "native")["te_root_env"] == "TE218_ROOT"
     assert _arm_config(_profile(), "consistency")["te_root_env"] == "TE218_ROOT"
 
@@ -47,7 +49,7 @@ def test_consistency_command_does_not_enable_rollout_logprob_reuse(tmp_path: Pat
     paths = _resolved_paths(profile, args)
     command = _runner_command(paths, profile, args)
 
-    assert command[command.index("--group") + 1] == "G01"
+    assert command[command.index("--group") + 1] == "consistency"
     assert "--use-rollout-logprobs" not in command
 
 
@@ -57,5 +59,5 @@ def test_native_command_uses_production_operator_route(tmp_path: Path):
     paths = _resolved_paths(profile, args)
     command = _runner_command(paths, profile, args)
 
-    assert command[command.index("--group") + 1] == "G00"
+    assert command[command.index("--group") + 1] == "native"
     assert "--use-rollout-logprobs" not in command

@@ -135,7 +135,7 @@ def test_launcher_forces_cuda_graph_without_a_logp_provider():
 
 
 def test_production_arms_do_not_install_the_rlkernel_logp_provider():
-    assert _linear_logp_provider_args(ARMS["G00"]) == ()
+    assert _linear_logp_provider_args(ARMS["native"]) == ()
     assert _linear_logp_provider_args(ARMS["G10"]) == ()
 
 
@@ -147,7 +147,7 @@ def test_rlkernel_arms_install_the_strict_logp_provider():
         "strict",
     )
 
-    assert _linear_logp_provider_args(ARMS["G01"]) == expected
+    assert _linear_logp_provider_args(ARMS["consistency"]) == expected
     assert _linear_logp_provider_args(ARMS["G11"]) == expected
 
 
@@ -202,7 +202,7 @@ def test_supplement_suite_uses_short_module_and_three_seed_precision_designs():
 
     precision = specs("precision")
     assert len(precision) == 12
-    assert {group for group, _, _ in precision} == {"G00", "G10", "G01", "G11"}
+    assert {group for group, _, _ in precision} == {"native", "G10", "consistency", "G11"}
     assert {seed for _, _, seed in precision} == {1234, 2345, 3456}
     assert all(rounds == 8 for _, rounds, _ in precision)
 

@@ -15,11 +15,11 @@
   },
   "modes": {
     "native": {
-      "internal_arm": "G00",
+      "te_root_env": "TE218_ROOT",
       "description": "Native VIME Attention, FFN, and logp operators."
     },
     "consistency": {
-      "internal_arm": "G01",
+      "te_root_env": "TE218_ROOT",
       "description": "RL-Kernel Attention, FFN, and logp operators."
     }
   },
@@ -28,37 +28,37 @@
     "runtime_root": null,
     "data_root": null,
     "output_root": null,
-    "te_root_g00": null,
-    "te_root_g01": null
+    "te_root_native": null,
+    "te_root_consistency": null
   },
   "repositories": {
     "rl_kernel": {
       "url": "https://github.com/RL-Align/RL-Kernel.git",
       "revisions": {
-        "G00": "d2173e8d948e8cf062ac36be32bdf53bac75daa0",
-        "G01": "d2173e8d948e8cf062ac36be32bdf53bac75daa0"
+        "native": "d2173e8d948e8cf062ac36be32bdf53bac75daa0",
+        "consistency": "d2173e8d948e8cf062ac36be32bdf53bac75daa0"
       }
     },
     "vime": {
       "url": "https://github.com/RL-Align/vime.git",
       "revisions": {
-        "G00": "1a113710e80aa7cfc271caa9bd90bcf348a7af08",
-        "G01": "1a113710e80aa7cfc271caa9bd90bcf348a7af08"
+        "native": "1a113710e80aa7cfc271caa9bd90bcf348a7af08",
+        "consistency": "1a113710e80aa7cfc271caa9bd90bcf348a7af08"
       }
     },
     "megatron": {
       "url": "https://github.com/NVIDIA/Megatron-LM.git",
       "revisions": {
-        "G00": "1dcf0dafa884ad52ffb243625717a3471643e087",
-        "G01": "1dcf0dafa884ad52ffb243625717a3471643e087"
+        "native": "1dcf0dafa884ad52ffb243625717a3471643e087",
+        "consistency": "1dcf0dafa884ad52ffb243625717a3471643e087"
       }
     }
   },
   "arms": {
-    "G00": {
+    "native": {
       "te_root_env": "TE218_ROOT"
     },
-    "G01": {
+    "consistency": {
       "te_root_env": "TE218_ROOT"
     }
   },

@@ -27,10 +27,10 @@ from typing import Any, Sequence
 EXAMPLE_RELATIVE = Path("examples/vime_qwen3_8b_tp4_cp2_200")
 DEFAULT_PROFILE = EXAMPLE_RELATIVE / "profiles/qwen3-8b-tp4-cp2.json"
 ARM_ALIASES = {
-    "g00": "G00",
-    "g01": "G01",
-    "native": "G00",
-    "consistency": "G01",
+    "g00": "native",
+    "g01": "consistency",
+    "native": "native",
+    "consistency": "consistency",
 }
 
 
@@ -39,7 +39,7 @@ class ReproError(RuntimeError):
 
 
 def canonical_arm(value: str) -> str:
-    """Map a concise user mode to the internal arm name."""
+    """Map a user mode to the descriptive run name."""
     canonical = ARM_ALIASES.get(value.strip().lower())
     if canonical is None:
         raise ReproError(f"unknown mode {value!r}; choose native or consistency")
@@ -202,7 +202,7 @@ def resolve_paths(
             _path(_override_or_env(te_root, "RLK_REPRO_TE_ROOT"))
             or _path(_profile_path(profile, f"te_root_{arm.lower()}"))
             or _path(
-                os.environ.get(str(profile.get("arms", {}).get(arm, {}).get("te_root_env", "")))
+                os.environ.get(str(profile.get("modes", {}).get(arm, {}).get("te_root_env", "")))
             )
             or workspace_path / f".te-root-{arm.lower()}"
         ),
@@ -346,10 +346,10 @@ def doctor(paths: Paths, profile: dict[str, Any], *, as_json: bool = False) -> i
 
 def _arm_config(profile: dict[str, Any], arm: str) -> dict[str, Any]:
     arm = canonical_arm(arm)
-    arms = profile.get("arms", {})
+    arms = profile.get("modes", {})
     config = arms.get(arm)
     if not isinstance(config, dict):
-        raise ReproError(f"unsupported arm {arm!r}; choose one of {', '.join(sorted(arms))}")
+        raise ReproError(f"unsupported mode {arm!r}; choose one of {', '.join(sorted(arms))}")
     return config
 
 
@@ -439,7 +439,7 @@ def _print_plan(paths: Paths, profile: dict[str, Any], args: argparse.Namespace)
         "schema_version": "rlkernel.repro.plan.v1",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "profile": profile.get("name"),
-        "arm": canonical_arm(args.arm),
+        "mode": canonical_arm(args.arm),
         "paths": {key: str(value) for key, value in asdict(paths).items()},
         "runner_command": command,
     }
@@ -449,6 +449,7 @@ def _print_plan(paths: Paths, profile: dict[str, Any], args: argparse.Namespace)
 
 def _prepare_repositories(paths: Paths, profile: dict[str, Any], arm: str) -> None:
     repos = profile.get("repositories", {})
+    mode = canonical_arm(arm)
     for key, target in (
         ("rl_kernel", paths.rl_kernel_root),
         ("vime", paths.vime_root),
@@ -467,7 +468,7 @@ def _prepare_repositories(paths: Paths, profile: dict[str, Any], arm: str) -> No
             raise ReproError(
                 f"{key} has local changes; commit or clean it before prepare: {target}"
             )
-        revision = config.get("revisions", {}).get(arm)
+        revision = config.get("revisions", {}).get(mode)
         if revision:
             _run(["git", "-C", str(target), "fetch", "origin"])
             _run(["git", "-C", str(target), "checkout", "--detach", str(revision)])
@@ -613,7 +614,7 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("--convert-checkpoint", action="store_true")
 
     for command in ("plan", "run"):
-        command_parser = subparsers.add_parser(command, help=f"{command} one reproduction arm")
+        command_parser = subparsers.add_parser(command, help=f"{command} one reproduction mode")
         _add_path_options(command_parser)
         command_parser.add_argument(
             "--mode",

@@ -2,7 +2,8 @@
 
 This directory publishes the completed half of the Qwen3-8B TP4/CP2
 consistency matrix. It contains one sealed 200-step run for G10 and one for
-G11. G00 and G01 were paused and are intentionally not represented here, so
+G11. The native and consistency runs were paused and are intentionally not
+represented here, so
 these artifacts must not be interpreted as a completed four-arm ablation.
 
 ## Result
