@@ -1,7 +1,7 @@
 {
   "schema_version": "rlkernel.vime_qwen3_8b_tp4_cp2_200.matrix.v1",
   "groups": {
-    "G00": {
+    "native": {
       "framework_use_rollout_logprobs": false,
       "attention_case": "P/P",
       "ffn_case": "P/P",
@@ -15,7 +15,7 @@
       "logp_case": "P/P",
       "description": "VIME framework-level consistency only"
     },
-    "G01": {
+    "consistency": {
       "framework_use_rollout_logprobs": false,
       "attention_case": "R/R",
       "ffn_case": "R/R",

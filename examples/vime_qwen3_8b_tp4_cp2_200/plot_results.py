@@ -14,12 +14,12 @@ from statistics import mean, pstdev
 from typing import Any
 
 
-COLORS = {"G00": "#6b7280", "G10": "#2563eb", "G01": "#dc2626", "G11": "#059669"}
-MARKERS = {"G00": "o", "G10": "x", "G01": "D", "G11": "+"}
+COLORS = {"native": "#6b7280", "G10": "#2563eb", "consistency": "#dc2626", "G11": "#059669"}
+MARKERS = {"native": "o", "G10": "x", "consistency": "D", "G11": "+"}
 LABELS = {
-    "G00": "G00: production",
+    "native": "native: production",
     "G10": "G10: framework",
-    "G01": "G01: operator",
+    "consistency": "consistency: operator",
     "G11": "G11: framework + operator",
 }
 

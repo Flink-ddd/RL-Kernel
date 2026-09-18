@@ -89,9 +89,9 @@ The current end-to-end path uses Qwen3-8B Dense with vime.
 
 ### ROCm MI300X
 
-[![Qwen3-8B ROCm training, reward, and train–rollout consistency curves](./examples/vime_qwen3_8b_tp4_cp2_200/results/pr396_rocm_s1234_g10_g11_200/consistency-reward.png)](https://github.com/RL-Align/RL-Kernel/pull/400)
+[![Qwen3-8B ROCm aligned training, reward, and train–rollout consistency curves](./docs/assets/readme/rocm-mi300x-aligned-consistency.png)](https://github.com/RL-Align/RL-Kernel/pull/418)
 
-[![Qwen3-8B ROCm mean absolute train–rollout LogP difference on MI300X](./examples/vime_qwen3_8b_tp4_cp2_200/results/pr396_rocm_s1234_g10_g11_200/mean-logp-diff.png)](https://github.com/RL-Align/RL-Kernel/pull/400)
+[![Qwen3-8B ROCm aligned mean absolute train–rollout LogP difference on MI300X](./docs/assets/readme/rocm-mi300x-aligned-mean-logp-diff.png)](https://github.com/RL-Align/RL-Kernel/pull/418)
 
 ## Hardware Support
 
@@ -120,6 +120,15 @@ cd RL-Kernel
 
 For the Qwen3-8B train–rollout commands and setup for vime with RL-Kernel on CUDA and
 ROCm, see the [reproduction scripts](https://github.com/RL-Align/RL-Kernel/blob/main/examples/vime_qwen3_8b_tp4_cp2_200/REPRODUCTION.md).
+
+Run the user-facing CUDA comparison with the profile-driven launcher:
+
+```bash
+python3 -m pip install -e .
+rlk-repro prepare --workspace /data/rlk-repro --mode native
+rlk-repro run --workspace /data/rlk-repro --mode native --rollouts 200
+rlk-repro run --workspace /data/rlk-repro --mode consistency --rollouts 200
+```
 
 ### NVIDIA CUDA
 
