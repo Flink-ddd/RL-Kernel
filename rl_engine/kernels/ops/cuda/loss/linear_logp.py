@@ -1287,6 +1287,81 @@ def sm90_deterministic_logp_from_local_logits_tp(
     return logp.reshape(lead_shape), lse.reshape(lead_shape)
 
 
+def sm90_deterministic_top_p_logp_from_local_logits_tp(
+    local_logits: torch.Tensor,
+    target_ids: torch.Tensor,
+    replay_ids: torch.Tensor,
+    replay_logprobs: torch.Tensor,
+    *,
+    vocab_start_index: int,
+    global_vocab_size: int,
+    real_vocab_size: int = -1,
+    temperature: Optional[torch.Tensor] = None,
+    tp_group: Any,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Score a compact top-p replay set with the dense kernel's reduction order.
+
+    This is deliberately inference-only: training retains the dense masked
+    logits so its existing autograd contract is unchanged.
+    """
+
+    required = "linear_logp_top_p_local_bf16_forward"
+    if not (_EXT_AVAILABLE and hasattr(_C, required)):
+        raise RuntimeError(f"strict TP top-p logits logp missing CUDA symbol: {required}")
+    if torch.is_grad_enabled() and local_logits.requires_grad:
+        raise RuntimeError("compact top-p local-logits logp is inference-only")
+    if local_logits.ndim != 2 or local_logits.dtype != torch.bfloat16:
+        raise TypeError("strict TP top-p logits logp requires 2-D BF16 local logits")
+    if not local_logits.is_cuda or not local_logits.is_contiguous():
+        raise ValueError("strict TP top-p logits logp requires contiguous CUDA logits")
+    if replay_ids.ndim != 2 or replay_logprobs.shape != replay_ids.shape:
+        raise ValueError("top-p replay ids/logprobs must be aligned 2-D tensors")
+    if replay_ids.size(0) != local_logits.size(0):
+        raise ValueError("top-p replay rows must align with local logits")
+    if replay_ids.size(1) > 64:
+        raise ValueError("top-p replay width exceeds the compact kernel limit of 64")
+
+    vocab_start = int(vocab_start_index)
+    global_vocab = _validate_even_tp_vocab_partition_local(
+        tp_group=tp_group,
+        vocab_start_index=vocab_start,
+        local_vocab_size=local_logits.size(1),
+        global_vocab_size=int(global_vocab_size),
+    )
+    real_vocab = global_vocab if int(real_vocab_size) < 0 else int(real_vocab_size)
+    if not 0 < real_vocab <= global_vocab:
+        raise ValueError(f"invalid real_vocab_size={real_vocab} for padded vocab={global_vocab}")
+    target = target_ids.reshape(-1).to(device=local_logits.device, dtype=torch.long).contiguous()
+    if target.numel() != local_logits.size(0):
+        raise ValueError("target_ids must contain one id per local-logits row")
+    _assert_global_targets_async(target, real_vocab)
+
+    if temperature is None:
+        temp = torch.ones(
+            local_logits.size(0), device=local_logits.device, dtype=torch.float32
+        )
+    else:
+        temp = temperature.to(device=local_logits.device, dtype=torch.float32).reshape(-1)
+        if temp.numel() == 1:
+            temp = temp.expand(local_logits.size(0)).contiguous()
+        if temp.numel() != local_logits.size(0):
+            raise ValueError("temperature must be positive and scalar or per-token")
+        torch._assert_async((temp > 0).all(), "temperature must be positive")
+
+    ids = replay_ids.to(device=local_logits.device, dtype=torch.int32).contiguous()
+    values = replay_logprobs.to(device=local_logits.device, dtype=torch.float32).contiguous()
+    local_target, local_lse = _C.linear_logp_top_p_local_bf16_forward(
+        local_logits,
+        target,
+        ids,
+        values,
+        temp,
+        vocab_start,
+    )
+    logp, lse = _merge_tp_local_logp(local_lse, local_target, tp_group=tp_group)
+    return logp.reshape(target_ids.shape), lse.reshape(target_ids.shape)
+
+
 class _StrictTensorParallelLinearLogpAutograd(torch.autograd.Function):
     @staticmethod
     def forward(
