@@ -2360,28 +2360,65 @@ class VllmLogpOperator:
                     f"{context.hidden.size(0)} != {token_ids.numel()}"
                 )
             assert self._linear_logp is not None
-            selected = self._linear_logp.from_local_logits(
-                local_logits,
-                token_ids,
-                tp_group=context.tp_group,
-                vocab_start_index=context.vocab_start_index,
-                global_vocab_size=context.global_vocab_size,
-                real_vocab_size=context.real_vocab_size,
-                temperature=float(os.getenv("RL_KERNEL_VLLM_TEMPERATURE", "1.0")),
-                target="rollout",
-                diagnostics_hidden=context.hidden,
-                diagnostics_lm_head_weight=context.lm_head_weight,
-            )
+            top_p_replay = False
+            if getattr(sampling_metadata, "top_p", None) is not None:
+                # Native vLLM has already applied temperature/top-p before it
+                # builds LogprobsTensors.  Reconstruct the exact finite nucleus
+                # on each TP shard so the strict replacement keeps processed
+                # logprob semantics instead of accidentally substituting a
+                # full-vocabulary selected logprob.
+                replay_ids = logprobs_tensors.logprob_token_ids
+                replay_values = logprobs_tensors.logprobs
+                if replay_ids.shape != replay_values.shape:
+                    raise RuntimeError(
+                        "vLLM top-p replay ids and logprobs must have matching shapes"
+                    )
+                if replay_ids.size(0) != local_logits.size(0):
+                    raise RuntimeError(
+                        "vLLM top-p replay rows are not aligned with strict local logits"
+                    )
+                top_p_replay = True
+            if top_p_replay:
+                selected = self._linear_logp.from_local_logits_top_p(
+                    local_logits,
+                    token_ids,
+                    replay_ids,
+                    replay_values,
+                    tp_group=context.tp_group,
+                    vocab_start_index=context.vocab_start_index,
+                    global_vocab_size=context.global_vocab_size,
+                    real_vocab_size=context.real_vocab_size,
+                    temperature=float(os.getenv("RL_KERNEL_VLLM_TEMPERATURE", "1.0")),
+                    target="rollout",
+                )
+            else:
+                selected = self._linear_logp.from_local_logits(
+                    local_logits,
+                    token_ids,
+                    tp_group=context.tp_group,
+                    vocab_start_index=context.vocab_start_index,
+                    global_vocab_size=context.global_vocab_size,
+                    real_vocab_size=context.real_vocab_size,
+                    temperature=float(os.getenv("RL_KERNEL_VLLM_TEMPERATURE", "1.0")),
+                    target="rollout",
+                    diagnostics_hidden=context.hidden,
+                    diagnostics_lm_head_weight=context.lm_head_weight,
+                )
             strict_provenance = self._linear_logp.provenance
-            expected_entrypoint = (
+            expected_entrypoints = {
                 "rocm_vocab_parallel_logp_from_local_logits_tp"
                 if torch.version.hip is not None
                 else "sm90_deterministic_logp_from_local_logits_tp"
-            )
+            }
+            if top_p_replay and torch.version.hip is None:
+                expected_entrypoints.add(
+                    "sm90_deterministic_top_p_logp_from_local_logits_tp"
+                )
             if (
                 strict_provenance.get("deterministic_linear_logp") is not True
                 or strict_provenance.get("actual_backend") != self._linear_logp.backend_id
-                or strict_provenance.get("strict_entrypoint") != expected_entrypoint
+                or strict_provenance.get("strict_entrypoint")
+                not in expected_entrypoints
             ):
                 raise RuntimeError(
                     "strict vLLM rollout linear_logp did not execute the deterministic "
@@ -2398,6 +2435,7 @@ class VllmLogpOperator:
                     "logits_materialized": True,
                     "padded_lm_head_alignment": True,
                     "duplicate_lm_head_gemm": False,
+                    "top_p_replay": top_p_replay,
                 },
                 "source_logits_shape": list(source_logits.shape),
                 "source_logits_dtype": _dtype_name(source_logits),

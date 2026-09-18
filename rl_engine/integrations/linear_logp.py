@@ -630,6 +630,79 @@ class LinearLogpWrapper:
         }
         return (result, lse) if return_lse else result
 
+    def from_local_logits_top_p(
+        self,
+        local_logits: torch.Tensor,
+        target_ids: torch.Tensor,
+        replay_ids: torch.Tensor,
+        replay_logprobs: torch.Tensor,
+        *,
+        tp_group: Any,
+        vocab_start_index: int,
+        global_vocab_size: int,
+        real_vocab_size: int,
+        target: str = "rollout",
+        temperature: float | torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Score compact rollout top-p support without a full-vocab replay mask."""
+
+        if local_logits.ndim != 2 or local_logits.dtype != torch.bfloat16:
+            raise TypeError("strict reused LM-head logits must be 2-D bfloat16")
+        if not local_logits.is_cuda or torch.version.hip is not None:
+            raise RuntimeError("strict reused LM-head logits require NVIDIA CUDA")
+        rank, world = self._tp_coordinates(tp_group)
+        if tp_group is None or world <= 1:
+            raise ValueError("reused rollout LM-head logits require a multi-rank TP group")
+        local_vocab = int(local_logits.size(1))
+        requested_global = int(global_vocab_size)
+        if requested_global != local_vocab * world:
+            raise ValueError("reused rollout LM-head logits must use equal TP shards")
+        if int(vocab_start_index) != rank * local_vocab:
+            raise ValueError("reused rollout LM-head logits use a wrong TP shard offset")
+        real = int(real_vocab_size)
+        if not 0 < real <= requested_global:
+            raise ValueError("real_vocab_size must be within the padded global vocabulary")
+        self._validate_targets(target_ids, rows=local_logits.size(0), real_vocab_size=real)
+        temperature_tensor = self._temperature_tensor(
+            temperature, rows=local_logits.size(0), device=local_logits.device
+        )
+        from rl_engine.kernels.ops.cuda.loss.linear_logp import (
+            sm90_deterministic_top_p_logp_from_local_logits_tp,
+        )
+
+        result, _lse = sm90_deterministic_top_p_logp_from_local_logits_tp(
+            local_logits.contiguous(),
+            target_ids,
+            replay_ids,
+            replay_logprobs,
+            tp_group=tp_group,
+            vocab_start_index=int(vocab_start_index),
+            global_vocab_size=requested_global,
+            real_vocab_size=real,
+            temperature=temperature_tensor,
+        )
+        self._last_provenance = {
+            **self._mismatch_provenance(),
+            "target": target,
+            "runtime_platform": "cuda",
+            "triton_used": False,
+            "actual_backend": self.backend_id,
+            "deterministic_linear_logp": True,
+            "strict_entrypoint": "sm90_deterministic_top_p_logp_from_local_logits_tp",
+            "local_logits_shape": list(local_logits.shape),
+            "replay_shape": list(replay_ids.shape),
+            "tp_group_present": True,
+            "vocab_start_index": int(vocab_start_index),
+            "global_vocab_size": requested_global,
+            "real_vocab_size": real,
+            "temperature": None if temperature is None else "provided",
+            "contract_version": "cuda-det-gemm-linear-logp-sm90-top-p-sparse-v1",
+            "logits_materialized": True,
+            "lm_head_result_reused": True,
+            "top_p_replay": True,
+        }
+        return result
+
     @staticmethod
     def _mismatch_provenance() -> dict[str, Any]:
         case_id = os.getenv("RL_KERNEL_LOGP_CASE", "P/P").strip().upper()

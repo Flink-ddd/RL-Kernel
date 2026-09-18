@@ -50,6 +50,13 @@ std::vector<torch::Tensor> linear_logp_local_probs_bf16_forward(torch::Tensor lo
 std::vector<torch::Tensor> linear_logp_local_bf16_forward(torch::Tensor logits,
                                                           torch::Tensor target,
                                                           int64_t vocab_start_index);
+std::vector<torch::Tensor> linear_logp_top_p_local_bf16_forward(
+    torch::Tensor logits,
+    torch::Tensor target,
+    torch::Tensor replay_ids,
+    torch::Tensor replay_logprobs,
+    torch::Tensor temperature,
+    int64_t vocab_start_index);
 torch::Tensor linear_logp_probs_bf16_to_dlogits_(torch::Tensor probs,
                                                  torch::Tensor target,
                                                  torch::Tensor grad_logp,
@@ -503,6 +510,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "Build local bf16 softmax probabilities, target logits, and lse from bf16 logits");
     m.def("linear_logp_local_bf16_forward", &linear_logp_local_bf16_forward,
           "Build local target logits and lse from bf16 logits without saving probabilities");
+    m.def("linear_logp_top_p_local_bf16_forward",
+          &linear_logp_top_p_local_bf16_forward,
+          "Build local target logits and lse from a compact top-p replay set");
     m.def("linear_logp_probs_bf16_to_dlogits_", &linear_logp_probs_bf16_to_dlogits_,
           "In-place bf16 probs -> dlogits for selected log-prob backward");
     m.def("linear_logp_local_probs_bf16_to_dlogits_",
