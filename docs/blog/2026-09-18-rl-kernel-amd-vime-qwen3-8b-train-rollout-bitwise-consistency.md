@@ -343,7 +343,7 @@ On the strict path, both `mismatch_count` and `max_abs_diff` remained at 0 for a
 
 Figure 1 plots raw reward, reference KL loss, train/rollout mismatch count, and maximum absolute Δlogp on the same 200-step timeline. RL-Kernel's strict path maintains zero mismatch throughout, while vime's native path exhibits mismatch at every step.
 
-**![][image30]**
+![][image30]
 
 *Figure 1: Training trajectories and consistency for native vime and vime + RL-Kernel.*
 
@@ -351,13 +351,15 @@ These signals occur together over the same period, consistent with the continued
 
 Figure 2 isolates the mean absolute train/rollout logprob difference over 200 steps. For vime + RL-Kernel, it remains at 0 throughout.
 
-### **![][image31]**
+![][image31]
 
 *Figure 2: Mean absolute train/rollout logprob difference over 200 steps. G10 denotes native vime; G11 denotes vime + RL-Kernel.*
 
 Figure 3 compares the performance of native vime and vime + RL-Kernel over 200 steps.
 
 ![][image32]
+
+*Figure 3: Performance comparison of native vime and vime + RL-Kernel over 200 steps on CUDA.*
 
 ## **Progress on Bitwise Alignment with ROCm**
 
@@ -388,17 +390,23 @@ On the strict path, both `mismatch_count` and `max_abs_diff` remained at 0 for a
 
 Figure 4 plots raw reward, reference KL loss, train/rollout mismatch count, and maximum absolute Δlogp on the same 200-step timeline. RL-Kernel's strict path maintains zero mismatch throughout, while vime's native path exhibits mismatch at every step.
 
-![][image33]*Figure 4: Training trajectories and consistency for native vime and vime + RL-Kernel.*
+![][image33]
+
+*Figure 4: Training trajectories and consistency for native vime and vime + RL-Kernel.*
 
 These signals occur together over the same period, consistent with the continued accumulation of train-rollout mismatch, and provide end-to-end evidence for strict alignment. Specifically, the results demonstrate that vime + RL-Kernel can maintain both verifiable bitwise consistency and a more stable training trajectory across all 200 steps.
 
 Figure 5 isolates the mean absolute train/rollout logprob difference over 200 steps. For vime + RL-Kernel, it remains at 0 throughout.
 
-![][image34]           *Figure 5: Mean absolute train/rollout logprob difference over 200 steps. G10 denotes native vime; G11 denotes vime + RL-Kernel.*
+![][image34]
+
+*Figure 5: Mean absolute train/rollout logprob difference over 200 steps. G10 denotes native vime; G11 denotes vime + RL-Kernel.*
 
 Figure 6 compares the performance of native vime and vime + RL-Kernel over 200 steps.
 
 ![][image35]
+
+*Figure 6: Performance comparison of native vime and vime + RL-Kernel over 200 steps on ROCm.*
 
 ## **Putting It All Together**
 
