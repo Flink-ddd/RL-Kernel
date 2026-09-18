@@ -2,6 +2,7 @@ nav:
   - Home: README.md
   - Blog:
     - blog/README.md
+    - "RL-Kernel v0.1.0: Train-Rollout Bitwise Consistency": blog/2026-09-18-rl-kernel-amd-vime-qwen3-8b-train-rollout-bitwise-consistency.md
     - Announcing RL-Kernel for vime: blog/2026-07-08-announcing-rl-kernel-linear-logp-for-vime.md
   - User Guide:
     - usage/README.md

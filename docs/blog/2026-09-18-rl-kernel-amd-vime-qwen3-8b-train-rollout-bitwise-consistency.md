@@ -1,4 +1,4 @@
-# **RL-Kernel × vime × AMD: Achieving Bitwise Consistency Between Training and Rollout**
+# RL-Kernel × vime × AMD: Achieving Bitwise Consistency Between Training and Rollout
 
 By the RL-Kernel Team
 
@@ -6,7 +6,7 @@ On-policy RL assumes that the rollout engine and the training engine evaluate th
 
 vime and RL-Kernel address two sides of this problem. vime manages the lifecycle of tokens, state, and weight versions; RL-Kernel aligns reduction and rounding boundaries across RMSNorm, Attention, GEMM, SwiGLU, linear logp, and distributed collectives. vime keeps both engines on the same training timeline; RL-Kernel ensures that they follow the same numerical execution contract.
 
-## **Introduction**
+## Introduction
 
 Training and rollout place different demands on their execution engines. Rollout prioritizes throughput for sampling, prefill, decode, and KV cache operations. Training must support forward and backward passes, optimizer state, and multidimensional parallelism. The two engines run the same model, but they may use different underlying operators.
 
@@ -14,7 +14,7 @@ When these differences affect the importance ratio and clipped objective before 
 
 We start with floating-point non-associativity and examine Attention, logp, RMSNorm, GEMM, and collectives as nested reductions. We then explain how vime and RL-Kernel divide the work and how controlled operator ablations can pinpoint divergences. Finally, we present 200-step results for ROCm and CUDA.
 
-### **Questions This Article Addresses**
+### Questions This Article Addresses
 
 * Why can training and rollout produce different logprobs even with identical models, weights, and inputs?
 * How can a comparability gate and a numerical execution contract help locate the first divergence?
@@ -22,9 +22,9 @@ We start with floating-point non-associativity and examine Attention, logp, RMSN
 * How do we confirm that zero mismatch actually comes from the intended backend?
 * What do the 200-step ROCm and CUDA results demonstrate?
 
-## **Eliminating Train-Rollout Mismatch**
+## Eliminating Train-Rollout Mismatch
 
-### **Why the Same Model Does Not Mean the Same Computation**
+### Why the Same Model Does Not Mean the Same Computation
 
 If the model, weights, and inputs are identical, why can the results differ? And why must seemingly separate components such as RMSNorm, Attention, GEMM, logp, and communication be addressed together?
 
@@ -32,7 +32,7 @@ The underlying principle is:
 
 > A model's formulas define the mathematical result, but not a unique execution path. Finite precision breaks some of the equivalences between those paths. Bitwise consistency therefore means ensuring that training and inference follow the same numerical contract.
 
-## **Spurious Policy Shifts Before Parameter Updates**
+## Spurious Policy Shifts Before Parameter Updates
 
 The rollout engine generates token aₜ given prefix hₜ and records
 
@@ -72,7 +72,7 @@ The same weights fix which numbers are added, but not which are added first.
 
 Reusing rollout logprobs and aligning operators are two different things. Reuse determines which recorded values the loss consumes. Operator alignment checks whether the engines obtain the same results when computing independently. Reuse can avoid some consequences of mismatch, but it does not establish alignment.
 
-## **Fixing the Mathematical Object and Numerical Contract**
+## Fixing the Mathematical Object and Numerical Contract
 
 Before discussing floating-point error, we must first establish whether the two engines are answering the same question. Write the ideal mathematical object as:
 
@@ -133,7 +133,7 @@ Fusion, materialization, and recomputation boundaries are not separate entries i
 
 The expression above represents the set difference between the training and inference arithmetic contracts. This difference identifies candidate root causes of mismatch.
 
-## **Nested Reductions in Transformers**
+## Nested Reductions in Transformers
 
 RMSNorm, Attention, GEMM, linear logp, and collectives all rely on reductions of this form:
 
@@ -151,7 +151,7 @@ Partition the reduction domain R, compute each local Agg(R⁽ʲ⁾), then merge 
 
 From this perspective, Split-K, Split-KV, vocabulary sharding, context parallelism, and rank trees simply partition different mathematical axes.
 
-### **The Shared Normalization Structure of Attention and Logprob**
+### The Shared Normalization Structure of Attention and Logprob
 
 Given a set of scores sᵢ, let
 
@@ -185,7 +185,7 @@ Actual execution, however, uses a merge operation ⊕̂ that includes rounding a
 
 where σⱼ = (mⱼ, lⱼ, oⱼ). The partition Πᵢ, reduction tree Tᵢ, exp primitive Aᵥ, and precision Pᵥ of m, l, and o are therefore part of the normalization itself.
 
-### **Reduction Order in RMSNorm, GEMM, and Communication**
+### Reduction Order in RMSNorm, GEMM, and Communication
 
 RMSNorm uses Σᵢ xᵢ², and GEMM uses Σₖ aᵢₖbₖⱼ. After a row-parallel GEMM, AllReduce continues the summation by adding the local sums from each rank.
 
@@ -203,7 +203,7 @@ Softmax applies the same (m, l) to every score. Through these shared normalizati
 
 This explains why fixing only one level is insufficient. Disabling Split-K in GEMM removes one class of partial merges within the kernel. If TP AllReduce still uses a different rank tree, however, the complete summation is still parenthesized differently. Conversely, fixing the rank tree cannot replace the warp/CTA reduction contract inside the kernel.
 
-### **Fusion and Rounding Boundaries**
+### Fusion and Rounding Boundaries
 
 Suppose one side executes
 
@@ -217,13 +217,13 @@ Both are SwiGLU on paper, but they differ in whether the intermediate tensor is 
 
 Likewise, two implementations labeled FP32 can still produce different bits if they use different exp, log, rsqrt, SiLU, FMA, or fast-math primitives. A dtype describes the container, not the computation in full.
 
-### **From Continuous Numerical Error to Discrete Path Divergence**
+### From Continuous Numerical Error to Discrete Path Divergence
 
 Small score differences can change sampling, argmax, top-k, or threshold decisions, after which the two trajectories are no longer comparable. The relevant discrete boundaries here are masks, positions, cache lookups, selected tokens, and vocabulary ownership.
 
 This is the purpose of fixed replay: freeze the tokens first, so that sampling different outcomes and computing different probabilities for the same token become two separate problems.
 
-## **How vime and RL-Kernel Work Together**
+## How vime and RL-Kernel Work Together
 
 This framework clarifies how vime and RL-Kernel work together.
 
@@ -247,7 +247,7 @@ The Qwen3/H100 strict path applies this approach at five boundaries:
 
 `num_splits=1` and no-Split-K are the easiest choices to audit in the current system. A valid contract can also be established as long as both sides fully fix the partition, partial state, and merge tree. Consistency requires only that these choices do not silently alter observable numerical semantics.
 
-### **Backward Has Its Own Execution Graph**
+### Backward Has Its Own Execution Graph
 
 Rollout has no backward pass, so forward train-rollout parity cannot imply cross-engine backward parity. Backward determinism is an additional training-side requirement, independent of training-inference consistency. Backpropagation introduces new reduction axes, whose execution order can introduce new nondeterminism. For example,
 
@@ -261,7 +261,7 @@ Written as a vector-Jacobian product (VJP), this becomes
 
 The evidence presented here verifies cross-engine consistency of forward logprobs. Reproducibility of the training backward pass must be checked separately: treat the VJP as its own computation graph and examine its domains, partitions, reduction trees, the precision of saved values, and communication. The setting `deterministic_backward=true` is part of this contract.
 
-## **Key Triggers of Train-Rollout Mismatch**
+## Key Triggers of Train-Rollout Mismatch
 
 Batch size, sequence length, prefill/decode, workspace, CUDA Graph, GPU model, and topology often vary alongside mismatch, but they are usually only triggers.
 
@@ -281,7 +281,7 @@ Batch size changes
 
 Saying that batch size causes mismatch describes a correlation. Saying that batch size triggers a different Split-K reduction tree gets closer to the root cause.
 
-### **Single-Variable Ablation**
+### Single-Variable Ablation
 
 Let C be the fully aligned baseline contract, and change only its kth field:
 
@@ -302,7 +302,7 @@ When isolating Attention, keep FFN and logp at R/R; apply the same principle whe
 
 R/R, P/R, R/P, and P/P identify the operator implementations used by each engine. The G00-G11 labels used later refer to a different, system-level matrix: whether rollout logprobs are reused and whether aligned operators are enabled.
 
-### **Strict Bitwise Consistency Requires Execution Provenance**
+### Strict Bitwise Consistency Requires Execution Provenance
 
 A credible zero-mismatch result requires at least five layers of evidence:
 
@@ -314,7 +314,7 @@ A credible zero-mismatch result requires at least five layers of evidence:
 
 A configuration file that enables RL-Kernel does not, by itself, prove that RL-Kernel actually ran. Nor does the presence of NCCL in application logs establish whether the target payload used a fixed reduction tree. Numerical results tell us what was computed; execution provenance tells us which path computed it. Both forms of evidence are necessary.
 
-## **Progress on Bitwise Alignment with CUDA**
+## Progress on Bitwise Alignment with CUDA
 
 The experimental materials for these CUDA results include 200-step records, aggregate tables, bootstrap statistics, validation, and plotting scripts.
 
@@ -343,25 +343,31 @@ On the strict path, both `mismatch_count` and `max_abs_diff` remained at 0 for a
 
 Figure 1 plots raw reward, reference KL loss, train/rollout mismatch count, and maximum absolute Δlogp on the same 200-step timeline. RL-Kernel's strict path maintains zero mismatch throughout, while vime's native path exhibits mismatch at every step.
 
-![][image30]
-
+<p align="center" markdown="1">
+![][image30]{ width="92%" }
+<br>
 *Figure 1: Training trajectories and consistency for native vime and vime + RL-Kernel.*
+</p>
 
 These signals occur together over the same period, consistent with the continued accumulation of train-rollout mismatch, and provide end-to-end evidence for strict alignment. Specifically, the results demonstrate that vime + RL-Kernel can maintain both verifiable bitwise consistency and a more stable training trajectory across all 200 steps.
 
 Figure 2 isolates the mean absolute train/rollout logprob difference over 200 steps. For vime + RL-Kernel, it remains at 0 throughout.
 
-![][image31]
-
+<p align="center" markdown="1">
+![][image31]{ width="92%" }
+<br>
 *Figure 2: Mean absolute train/rollout logprob difference over 200 steps. G10 denotes native vime; G11 denotes vime + RL-Kernel.*
+</p>
 
 Figure 3 compares the performance of native vime and vime + RL-Kernel over 200 steps.
 
-![][image32]
-
+<p align="center" markdown="1">
+![][image32]{ width="92%" }
+<br>
 *Figure 3: Performance comparison of native vime and vime + RL-Kernel over 200 steps on CUDA.*
+</p>
 
-## **Progress on Bitwise Alignment with ROCm**
+## Progress on Bitwise Alignment with ROCm
 
 We completed a 200-step strict R/R validation on ROCm using the full system of Megatron training and vLLM rollout, with zero mismatch throughout. This validates the integrated stack with all changes incorporated to date, rather than testing a single PR in isolation. The ROCm path uses the same correctness criteria while retaining the native execution paths for AITER, CK, paged KV, HIP Graph, and ROCm collectives. Information read back at runtime verifies the actual backend, execution path, and fallback status.
 
@@ -390,25 +396,31 @@ On the strict path, both `mismatch_count` and `max_abs_diff` remained at 0 for a
 
 Figure 4 plots raw reward, reference KL loss, train/rollout mismatch count, and maximum absolute Δlogp on the same 200-step timeline. RL-Kernel's strict path maintains zero mismatch throughout, while vime's native path exhibits mismatch at every step.
 
-![][image33]
-
+<p align="center" markdown="1">
+![][image33]{ width="92%" }
+<br>
 *Figure 4: Training trajectories and consistency for native vime and vime + RL-Kernel.*
+</p>
 
 These signals occur together over the same period, consistent with the continued accumulation of train-rollout mismatch, and provide end-to-end evidence for strict alignment. Specifically, the results demonstrate that vime + RL-Kernel can maintain both verifiable bitwise consistency and a more stable training trajectory across all 200 steps.
 
 Figure 5 isolates the mean absolute train/rollout logprob difference over 200 steps. For vime + RL-Kernel, it remains at 0 throughout.
 
-![][image34]
-
+<p align="center" markdown="1">
+![][image34]{ width="92%" }
+<br>
 *Figure 5: Mean absolute train/rollout logprob difference over 200 steps. G10 denotes native vime; G11 denotes vime + RL-Kernel.*
+</p>
 
 Figure 6 compares the performance of native vime and vime + RL-Kernel over 200 steps.
 
-![][image35]
-
+<p align="center" markdown="1">
+![][image35]{ width="92%" }
+<br>
 *Figure 6: Performance comparison of native vime and vime + RL-Kernel over 200 steps on ROCm.*
+</p>
 
-## **Putting It All Together**
+## Putting It All Together
 
 These modules may seem unrelated to readers unfamiliar with distributed kernels. The argument connecting them is:
 
@@ -424,7 +436,7 @@ These modules may seem unrelated to readers unfamiliar with distributed kernels.
 
 Train-rollout mismatch is an abstraction leak: higher layers mistake mathematical equivalence for numerical equivalence. RL-Kernel makes numerical consistency part of the interface between engines, rather than just a property of individual deterministic operators. The numerical contract also specifies which observable behavior optimizations must preserve. Training and inference may still use different memory layouts, parallelism schemes, and scheduling strategies. As long as those changes preserve dependency domains and rounding boundaries, they remain within the same verifiable implementation. What must be eliminated is undeclared arithmetic variation.
 
-## **Next Steps**
+## Next Steps
 
 * Expand support to more models and multimodal architectures.
 * Continue porting to MUSA, Ascend, and additional hardware platforms.
@@ -432,11 +444,11 @@ Train-rollout mismatch is an abstraction leak: higher layers mistake mathematica
 
 Models, hardware, and execution frameworks for RL post-training will continue to change. RL-Kernel aims to keep explicit correctness criteria in the system so that every kernel replacement, framework upgrade, or hardware migration can be checked for preserved numerical semantics, with any divergence traced to its starting point.
 
-## **Acknowledgments**
+## Acknowledgments
 
 The release of RL-Kernel v0.1.0 would not have been possible without the generous support of our hardware partners, open-source ecosystem partners, and core development team.
 
-#### Hardware and Compute Partners
+### Hardware and Compute Partners
 
 We sincerely thank Liz Li and Yuhan Yang from AMD for providing AMD Instinct GPU compute resources, close technical collaboration, and long-term support for RL-Kernel. We look forward to continuing our work on cross-platform consistency validation, kernel-level performance optimization, and deployment of large-scale RL workloads on ROCm.
 
@@ -444,11 +456,11 @@ We also thank Lei Ding from Moore Threads for advancing MUSA platform support, a
 
 Consistent execution and generalization across heterogeneous hardware platforms are central to RL-Kernel's long-term goals. We welcome collaboration with more hardware vendors and open-source communities to build open, efficient RL-Kernel infrastructure together.
 
-#### Open-Source Ecosystem and Framework Collaboration
+### Open-Source Ecosystem and Framework Collaboration
 
 We thank the vLLM community for its close collaboration with RL-Kernel. Special thanks go to Ao Shen, vime maintainer at Inferact, for the trust and support throughout the RL-Kernel and vime integration, community collaboration, and ongoing maintenance. This work builds on the open-source ecosystem of vLLM rollout, vime orchestration, and Megatron training.
 
-#### Core Contributors - v0.1.0
+### Core Contributors - v0.1.0
 
 Special thanks to the RL-Kernel core contributors for their work on architecture design, kernel implementation, operator-level training-inference consistency for dense models, distributed validation, and community building for v0.1.0.
 
