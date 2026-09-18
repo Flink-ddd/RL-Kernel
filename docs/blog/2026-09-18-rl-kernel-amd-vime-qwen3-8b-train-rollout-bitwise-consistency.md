@@ -37,20 +37,20 @@ The underlying principle is:
 The rollout engine generates token $a_t$ given prefix $h_t$ and records
 
 $$
-\ell_t^{\mathrm{R}} = \log \mu(a_t \mid h_t).
+\ell_t^{\mathrm{R}} = \log \mu(a_t \mid h_t)
 $$
 
 Before training begins, the training engine rescores the token using the same weight version:
 
 $$
-\ell_t^{\mathrm{T}} = \log q(a_t \mid h_t).
+\ell_t^{\mathrm{T}} = \log q(a_t \mid h_t)
 $$
 
 If the policy has not yet been updated and both engines are indeed computing the same logical object, the importance ratio should satisfy:
 
 $$
 \rho_t = \frac{q_t}{\mu_t}
-= \exp\!\left(\ell_t^{\mathrm{T}} - \ell_t^{\mathrm{R}}\right) = 1.
+= \exp\!\left(\ell_t^{\mathrm{T}} - \ell_t^{\mathrm{R}}\right) = 1
 $$
 
 Let $\delta_t = \ell_t^{\mathrm{T}} - \ell_t^{\mathrm{R}}$. When $\delta_t$ is small, $\rho_t \approx 1 + \delta_t$. This difference also enters the clipped objective in PPO and GRPO:
@@ -60,7 +60,7 @@ J_t = \min\!\left(
 \rho_t \widehat{A}_t,
 \operatorname{clip}\!\left(\rho_t, 1 - \epsilon_{\mathrm{low}}, 1 + \epsilon_{\mathrm{high}}\right)
 \widehat{A}_t
-\right).
+\right)
 $$
 
 Here, $\widehat{A}_t$ is the advantage estimate. If $\delta_t$ exceeds $\log(1 + \epsilon_{\mathrm{high}})$ or falls below $\log(1 - \epsilon_{\mathrm{low}})$, the mismatch can even change which clipping branch is taken. It creates an apparent policy shift before any parameter update.
@@ -71,7 +71,7 @@ $$
 \frac{q_t}{\mu_t}
 = \frac{q_t}{s_t^{\mathrm{P}}}
 \times \frac{s_t^{\mathrm{P}}}{s_t^{\mathrm{D}}}
-\times \frac{s_t^{\mathrm{D}}}{\mu_t}.
+\times \frac{s_t^{\mathrm{D}}}{\mu_t}
 $$
 
 The first term compares training scoring with serving prefill; the second compares prefill with decode; and the third checks the weight version, cache state, and record identity. This decomposition matters: although the final ratio is a single quantity, it spans three interfaces involving cross-engine arithmetic, the two inference paths, and system state. If any of these is not held fixed, we should not loosely attribute the total difference to a kernel error.
@@ -79,13 +79,13 @@ The first term compares training scoring with serving prefill; the second compar
 At its core, the problem comes down to the non-associativity of floating-point addition. Consider BF16 with round-to-nearest-even:
 
 $$
-\operatorname{fl}\!\left(\operatorname{fl}(1 + 2^{-8}) + 2^{-8}\right) = 1,
+\operatorname{fl}\!\left(\operatorname{fl}(1 + 2^{-8}) + 2^{-8}\right) = 1
 $$
 
 whereas
 
 $$
-\operatorname{fl}\!\left(1 + \operatorname{fl}(2^{-8} + 2^{-8})\right) = 1 + 2^{-7}.
+\operatorname{fl}\!\left(1 + \operatorname{fl}(2^{-8} + 2^{-8})\right) = 1 + 2^{-7}
 $$
 
 In real arithmetic, these expressions differ only in their parentheses. In BF16, they produce different answers. Training is designed around packed sequences, backpropagation, and multi-GPU parallelism; inference is designed around prefill, decode, dynamic batching, and the KV cache. Even with shared parameters, these different objectives can lead the engines to choose different partitions, reduction orders, and intermediate precision.
@@ -99,7 +99,7 @@ Reusing rollout logprobs and aligning operators are two different things. Reuse 
 Before discussing floating-point error, we must first establish whether the two engines are answering the same question. Write the ideal mathematical object as:
 
 $$
-y = F(x, \theta, s, \xi).
+y = F(x, \theta, s, \xi)
 $$
 
 Here, $x$ denotes the input, $\theta$ the weights, $s$ the state, including the KV cache, and $\xi$ the random state involved in the computation. What training and rollout actually execute is:
@@ -107,9 +107,9 @@ Here, $x$ denotes the input, $\theta$ the weights, $s$ the state, including the 
 $$
 \begin{aligned}
 y^{\mathrm{T}} &= \widehat{F}_{C^{\mathrm{T}}}
-\left(x^{\mathrm{T}}, \theta^{\mathrm{T}}, s^{\mathrm{T}}, \xi^{\mathrm{T}}\right), \\
+\left(x^{\mathrm{T}}, \theta^{\mathrm{T}}, s^{\mathrm{T}}, \xi^{\mathrm{T}}\right) \\
 y^{\mathrm{R}} &= \widehat{F}_{C^{\mathrm{R}}}
-\left(x^{\mathrm{R}}, \theta^{\mathrm{R}}, s^{\mathrm{R}}, \xi^{\mathrm{R}}\right).
+\left(x^{\mathrm{R}}, \theta^{\mathrm{R}}, s^{\mathrm{R}}, \xi^{\mathrm{R}}\right)
 \end{aligned}
 $$
 
@@ -129,20 +129,20 @@ If any of these differs, record `comparable = false`. Physical page numbers and 
 Once this gate is passed, describe each computation node in turn. First, write
 
 $$
-y_i = \phi_i(x_{D_i}),
+y_i = \phi_i(x_{D_i})
 $$
 
 Here, $D_i$ is the set of input elements on which output $y_i$ actually depends. If the node can also be written as
 
 $$
-y_i = \bigoplus_{k \in \mathcal{R}_i} f(i, k),
+y_i = \bigoplus_{k \in \mathcal{R}_i} f(i, k)
 $$
 
 then $\mathcal{R}_i$ is its reduction domain. The two sides must first satisfy
 
 $$
-D_i^{\mathrm{T}} = D_i^{\mathrm{R}},
-\qquad \mathcal{R}_i^{\mathrm{T}} = \mathcal{R}_i^{\mathrm{R}}.
+D_i^{\mathrm{T}} = D_i^{\mathrm{R}}
+\qquad \mathcal{R}_i^{\mathrm{T}} = \mathcal{R}_i^{\mathrm{R}}
 $$
 
 Next, partition the reduction domain:
@@ -150,8 +150,8 @@ Next, partition the reduction domain:
 $$
 \begin{aligned}
 \mathcal{R}_i &= \mathcal{R}_i^{(0)} \cup \mathcal{R}_i^{(1)}
-\cup \cdots \cup \mathcal{R}_i^{(m-1)}, \\
-\Pi_i &= \left\{\mathcal{R}_i^{(0)}, \ldots, \mathcal{R}_i^{(m-1)}\right\}.
+\cup \cdots \cup \mathcal{R}_i^{(m-1)} \\
+\Pi_i &= \left\{\mathcal{R}_i^{(0)}, \ldots, \mathcal{R}_i^{(m-1)}\right\}
 \end{aligned}
 $$
 
@@ -162,20 +162,20 @@ Then record the node's precision tuple
 $$
 \begin{aligned}
 P_v = (&p_{\mathrm{input}}, p_{\mathrm{multiply}}, p_{\mathrm{accumulate}}, \\
-       &p_{\mathrm{state}}, p_{\mathrm{output}}),
+       &p_{\mathrm{state}}, p_{\mathrm{output}})
 \end{aligned}
 $$
 
 and write each rounding operation as
 
 $$
-z = Q_p(x).
+z = Q_p(x)
 $$
 
 Collecting the quantities that can independently change the result gives the following minimal arithmetic contract:
 
 $$
-C_v = (D_v, \Pi_v, T_v, P_v, R_v, A_v).
+C_v = (D_v, \Pi_v, T_v, P_v, R_v, A_v)
 $$
 
 Here, $D_v$ captures the dependency sets and reduction domains of the node's outputs; $\Pi_v$ and $T_v$ specify the reduction partition and ordered merge tree; $P_v$ is the precision tuple; $R_v$ records where $Q_p$ occurs; and $A_v$ identifies the specific numerical primitives used, such as exp, log, rsqrt, and SiLU.
@@ -183,7 +183,7 @@ Here, $D_v$ captures the dependency sets and reduction domains of the node's out
 Fusion, materialization, and recomputation boundaries are not separate entries in this arithmetic contract. They affect numerical results only when they change $T_v$, $P_v$, $R_v$, or $A_v$, so they are better recorded as execution mechanisms. State and control also remain outside the tuple: the comparability gate checks state such as the cache and RNG, while control conditions such as dispatch and CUDA Graph are treated as triggers. This avoids accounting for the same cause at multiple levels.
 
 $$
-\Delta C_v = C_v^{\mathrm{T}} \mathbin{\triangle} C_v^{\mathrm{R}} \ne \varnothing.
+\Delta C_v = C_v^{\mathrm{T}} \mathbin{\triangle} C_v^{\mathrm{R}} \ne \varnothing
 $$
 
 The expression above represents the set difference between the training and inference arithmetic contracts. This difference identifies candidate root causes of mismatch.
@@ -193,7 +193,7 @@ The expression above represents the set difference between the training and infe
 RMSNorm, Attention, GEMM, linear logp, and collectives all rely on reductions of this form:
 
 $$
-\operatorname{Agg}(\mathcal{R}) = \bigoplus_{i \in \mathcal{R}} u_i.
+\operatorname{Agg}(\mathcal{R}) = \bigoplus_{i \in \mathcal{R}} u_i
 $$
 
 Partition the reduction domain $\mathcal{R}$, compute each local $\operatorname{Agg}(\mathcal{R}^{(j)})$, then merge the results. In real arithmetic, different partitions and parenthesizations are generally considered equivalent. In finite-precision execution, they are not.
@@ -213,7 +213,7 @@ From this perspective, Split-K, Split-KV, vocabulary sharding, context paralleli
 Given a set of scores $s_i$, let
 
 $$
-m = \max_i s_i, \qquad l = \sum_i e^{s_i - m}.
+m = \max_i s_i \qquad l = \sum_i e^{s_i - m}
 $$
 
 $m$ is the maximum within the domain, and $l$ is the sum of exponentials relative to that maximum. In real arithmetic, the final result can be expressed using a single log-sum-exp (LSE) value. Actual kernels, however, update and merge $m$ and $l$ separately, so the bitwise contract must retain both intermediate states.
@@ -221,14 +221,14 @@ $m$ is the maximum within the domain, and $l$ is the sum of exponentials relativ
 Linear logp needs only $(m, l)$ and the target logit:
 
 $$
-\log p(a) = z_a - (m + \log l).
+\log p(a) = z_a - (m + \log l)
 $$
 
 Attention carries an additional vector:
 
 $$
-o = \sum_i e^{s_i - m} v_i,
-\qquad \operatorname{Attn}(q, K, V) = o / l.
+o = \sum_i e^{s_i - m} v_i
+\qquad \operatorname{Attn}(q, K, V) = o / l
 $$
 
 Both perform the same kind of LSE aggregation, but over different spaces. Attention normalizes over the context to determine which tokens to attend to; logp normalizes over the vocabulary to determine which token to select. Attention's Split-KV merge and logp's vocabulary merge across tensor-parallel (TP) ranks are mathematically two instances of the same problem.
@@ -237,8 +237,8 @@ To merge two blocks $(m_1, l_1, o_1)$ and $(m_2, l_2, o_2)$, first set $m = \max
 
 $$
 \begin{aligned}
-l &= e^{m_1 - m} l_1 + e^{m_2 - m} l_2, \\
-o &= e^{m_1 - m} o_1 + e^{m_2 - m} o_2.
+l &= e^{m_1 - m} l_1 + e^{m_2 - m} l_2 \\
+o &= e^{m_1 - m} o_1 + e^{m_2 - m} o_2
 \end{aligned}
 $$
 
@@ -246,9 +246,9 @@ In real arithmetic, this merge operation is associative, so any partition can re
 
 $$
 \begin{aligned}
-m &= \max_j m_j, \\
-l &= \sum_j e^{m_j - m} l_j, \\
-o &= \sum_j e^{m_j - m} o_j.
+m &= \max_j m_j \\
+l &= \sum_j e^{m_j - m} l_j \\
+o &= \sum_j e^{m_j - m} o_j
 \end{aligned}
 $$
 
@@ -260,7 +260,7 @@ $$
 (\sigma_1 \mathbin{\widehat{\oplus}} \sigma_2)
 \mathbin{\widehat{\oplus}} \sigma_3
 \ne \sigma_1 \mathbin{\widehat{\oplus}}
-(\sigma_2 \mathbin{\widehat{\oplus}} \sigma_3),
+(\sigma_2 \mathbin{\widehat{\oplus}} \sigma_3)
 $$
 
 where $\sigma_j = (m_j, l_j, o_j)$. The partition $\Pi_i$, reduction tree $T_i$, exp primitive $A_v$, and precision $P_v$ of $m$, $l$, and $o$ are therefore part of the normalization itself.
@@ -275,7 +275,7 @@ $$
 \begin{aligned}
 Y_{ij} &= \sum_{k \in K} X_{ik} W_{kj} \\
        &= \sum_{r=0}^{p-1}
-\underbrace{\sum_{k \in K_r} X_{ik} W_{kj}}_{Y_{ij}^{(r)}}.
+\underbrace{\sum_{k \in K_r} X_{ik} W_{kj}}_{Y_{ij}^{(r)}}
 \end{aligned}
 $$
 
@@ -285,7 +285,7 @@ RMSNorm and softmax share another structural feature: both first reduce a domain
 
 $$
 \operatorname{RMSNorm}(x)_j
-= \gamma_j x_j \left(\epsilon + \frac{1}{d} \sum_{k=1}^{d} x_k^2\right)^{-1/2}.
+= \gamma_j x_j \left(\epsilon + \frac{1}{d} \sum_{k=1}^{d} x_k^2\right)^{-1/2}
 $$
 
 Softmax applies the same $(m, l)$ to every score. Through these shared normalization statistics, a one-bit difference in the reduction can affect the entire hidden vector, an entire Attention row, or the whole vocabulary distribution at once. These operations serve different purposes but share the same numerical structure.
@@ -341,7 +341,7 @@ The Qwen3/H100 strict path applies this approach at five boundaries:
 Rollout has no backward pass, so forward train-rollout parity cannot imply cross-engine backward parity. Backward determinism is an additional training-side requirement, independent of training-inference consistency. Backpropagation introduces new reduction axes, whose execution order can introduce new nondeterminism. For example,
 
 $$
-dW = \sum_t dY_t X_t^{\mathsf{T}}.
+dW = \sum_t dY_t X_t^{\mathsf{T}}
 $$
 
 Forward GEMM reduces over the hidden/K dimension; here, the reduction is over the token dimension. Microbatch partitioning, gradient accumulation order, the values saved or recomputed, atomics, and gradient collectives can all change the parenthesization again.
@@ -349,7 +349,7 @@ Forward GEMM reduces over the hidden/K dimension; here, the reduction is over th
 Written as a vector-Jacobian product (VJP), this becomes
 
 $$
-(dx, d\theta) = J_F(x, \theta)^{\mathsf{T}}\,dy.
+(dx, d\theta) = J_F(x, \theta)^{\mathsf{T}}\,dy
 $$
 
 The evidence presented here verifies cross-engine consistency of forward logprobs. Reproducibility of the training backward pass must be checked separately: treat the VJP as its own computation graph and examine its domains, partitions, reduction trees, the precision of saved values, and communication. The setting `deterministic_backward=true` is part of this contract.
@@ -380,8 +380,8 @@ Let $C$ be the fully aligned baseline contract, and change only its $k$th field:
 
 $$
 \begin{aligned}
-C' &= C - \delta_k, \\
-\Delta_k(x) &= \widehat{F}(x; C') - \widehat{F}(x; C).
+C' &= C - \delta_k \\
+\Delta_k(x) &= \widehat{F}(x; C') - \widehat{F}(x; C)
 \end{aligned}
 $$
 
