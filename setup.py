@@ -485,6 +485,7 @@ setup(
     entry_points={
         "console_scripts": [
             "rlk-drift-view=rl_engine.alignment.cross_config.drift_viewer:main",
+            "rlk-repro=rl_engine.repro:main",
         ],
     },
     python_requires=">=3.10",
