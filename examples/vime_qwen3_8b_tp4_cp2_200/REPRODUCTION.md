@@ -1,5 +1,10 @@
 # Reproduce and profile the Qwen3-8B TP4/CP2 experiment
 
+> New user runs should use `rlk-repro run --mode native` or
+> `rlk-repro run --mode consistency`. The G10/G11 commands below are retained as
+> historical audit instructions; they are not the default comparison and the
+> new profile does not enable `--use-rollout-logprobs`.
+
 This runbook records the commands used for the 200-step G10/G11 experiment and
 the commands used to analyse its performance. Run every training replica under
 a **new** run ID. The published G11 run

@@ -29,9 +29,11 @@ class Arm:
 
 
 ARMS = {
-    "G00": Arm("G00", False, "P/P", "P/P", "P/P", "native VIME baseline"),
+    "native": Arm("native", False, "P/P", "P/P", "P/P", "native VIME baseline"),
     "G10": Arm("G10", True, "P/P", "P/P", "P/P", "VIME framework-level consistency only"),
-    "G01": Arm("G01", False, "R/R", "R/R", "R/R", "RL-Kernel operator-level consistency only"),
+    "consistency": Arm(
+        "consistency", False, "R/R", "R/R", "R/R", "RL-Kernel operator consistency"
+    ),
     "G11": Arm(
         "G11",
         True,
@@ -51,6 +53,10 @@ ARMS = {
     "M011": Arm("M011", False, "P/P", "R/R", "R/R", "RL-Kernel FFN and logp"),
     "M111": Arm("M111", False, "R/R", "R/R", "R/R", "all RL-Kernel operators"),
 }
+# User-facing names for the two operator comparison arms. The legacy G00/G01
+# spellings remain accepted so historical manifests and audit scripts continue
+# to work, but new runs are recorded with the descriptive mode name.
+LEGACY_GROUP_ALIASES = {"G00": "native", "G01": "consistency"}
 
 TOPOLOGY = {
     "gpus": 8,
@@ -247,7 +253,9 @@ def _write_json(path: Path, value: Any) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--group", choices=tuple(ARMS), required=True)
+    parser.add_argument(
+        "--group", choices=tuple(ARMS) + tuple(LEGACY_GROUP_ALIASES), required=True
+    )
     parser.add_argument("--num-rollout", type=int, required=True)
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--rollout-seed", type=int, default=42)
@@ -328,6 +336,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    args.group = LEGACY_GROUP_ALIASES.get(args.group, args.group)
     if args.num_rollout <= 0:
         raise ValueError("--num-rollout must be positive")
     trajectories_per_rollout = args.rollout_batch_size * args.n_samples_per_prompt

@@ -121,6 +121,15 @@ cd RL-Kernel
 For the Qwen3-8B train–rollout commands and setup for vime with RL-Kernel on CUDA and
 ROCm, see the [reproduction scripts](https://github.com/RL-Align/RL-Kernel/blob/main/examples/vime_qwen3_8b_tp4_cp2_200/REPRODUCTION.md).
 
+Run the user-facing CUDA comparison with the profile-driven launcher:
+
+```bash
+python3 -m pip install -e .
+rlk-repro prepare --workspace /data/rlk-repro --mode native
+rlk-repro run --workspace /data/rlk-repro --mode native --rollouts 200
+rlk-repro run --workspace /data/rlk-repro --mode consistency --rollouts 200
+```
+
 ### NVIDIA CUDA
 
 Build against a visible NVIDIA GPU. Set TORCH_CUDA_ARCH_LIST when you want to pin the

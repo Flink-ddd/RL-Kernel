@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 
 MODULE_GROUPS = ("M000", "M100", "M010", "M001", "M110", "M101", "M011", "M111")
-PRECISION_GROUPS = ("G00", "G10", "G01", "G11")
+PRECISION_GROUPS = ("native", "G10", "consistency", "G11")
 PRECISION_SEEDS = (1234, 2345, 3456)
 
 

@@ -1,8 +1,8 @@
 # VIME Qwen3-8B TP4/CP2 200-round consistency experiment
 
-This example measures train/rollout numerical consistency at two independent
-layers: VIME's framework-level reuse of rollout log-probabilities and
-RL-Kernel's operator-level alignment of Attention, dense FFN, and linear logp.
+This example measures train/rollout numerical consistency for Attention, dense
+FFN, and linear logp. The normal user-facing comparison keeps the framework
+path fixed and changes only the operator implementation.
 It is designed for one 8×H100 node. Megatron uses TP4/CP2 across all eight
 GPUs; two TP4 vLLM engines share those GPUs through VIME colocated offload.
 
@@ -20,21 +20,51 @@ All launch commands are maintained in [`REPRODUCTION.md`](REPRODUCTION.md).
 This README describes the experiment and its acceptance boundary; it does not
 duplicate host-specific launch commands.
 
-## Ablation matrix
+## User-facing launcher
 
-| Group | VIME `--use-rollout-logprobs` | Attention / FFN / logp | Purpose |
+For a new reproduction, use the profile-driven launcher instead of assembling
+the host-specific shell commands by hand. Install RL-Kernel in editable mode,
+then point the launcher at a workspace containing the runtime, model, data, and
+the sibling VIME/Megatron checkouts:
+
+```bash
+pip install -e .
+rlk-repro prepare --workspace /data/rlk-repro --mode native
+rlk-repro doctor --workspace /data/rlk-repro --mode native
+rlk-repro run --workspace /data/rlk-repro --mode native --rollouts 200
+```
+
+Add `--download-data --convert-checkpoint` to `prepare` when the prompt data
+and Megatron torch-dist checkpoint are not present yet.
+
+The two user-facing modes are intentionally short and semantic:
+
+| Mode | Meaning |
+|---|---|---|
+| `native` | Native VIME Attention, FFN, and logp operators |
+| `consistency` | RL-Kernel Attention, FFN, and logp operators |
+
+Neither user-facing mode enables `--use-rollout-logprobs`; that historical
+framework-reuse branch remains documented only in the advanced runbook. Use
+`rlk-repro plan` to inspect the resolved command without submission and
+`rlk-repro validate` / `rlk-repro report` after a run. The full shell runbook
+remains available in [`REPRODUCTION.md`](REPRODUCTION.md) for advanced audits.
+
+## User-facing operator matrix
+
+| Mode | Rollout log-prob reuse | Attention / FFN / logp | Purpose |
 |---|---:|---|---|
-| G00 | off | P/P | Production baseline |
-| G10 | on | P/P | Framework-level consistency only |
-| G01 | off | R/R | RL-Kernel operator-level consistency only |
-| G11 | on | R/R | Framework-level plus operator-level consistency |
+| `native` | off | P/P | Native VIME baseline |
+| `consistency` | off | R/R | RL-Kernel operator consistency |
 
 `P/P` selects the production implementation on training and rollout. For
 Megatron linear logp this means that no external provider is configured and
 VIME calls its native `calculate_log_probs_and_entropy` implementation
 directly. `R/R` selects RL-Kernel on both sides and installs the strict
-RL-Kernel linear-logp provider. All four groups use the same prompts, initial
-checkpoint, sampling settings, seeds, TP4/CP2 topology, and batch sizes.
+RL-Kernel linear-logp provider. Both user-facing modes use the same prompts,
+initial checkpoint, sampling settings, seeds, TP4/CP2 topology, and batch
+sizes. The historical framework-reuse arms remain in `run_arm.py` and the full
+runbook for audit only; they are not part of the new launcher profile.
 
 The CUDA module ablation is the `M000`-`M111` matrix defined by the same
 `run_arm.py` and `experiment_matrix.json`; it is intentionally kept under this
@@ -46,10 +76,9 @@ AITER/CK, and RCCL-specific routes that cannot pass the CUDA validation gates.
 The Attention-only runner is a historical attribution diagnostic, not a second
 definition of the module matrix.
 
-Do not interpret G10/G11 as evidence that train and rollout recomputation is
-bitwise equal: framework reuse changes which stored logp enters the RL loss.
-The direct numerical claim comes from G01/G11 and the runtime comparison
-metrics.
+The direct numerical claim for the user-facing comparison comes from the
+`consistency` mode and the runtime comparison metrics. It does not depend on
+the removed `--use-rollout-logprobs` framework-reuse branch.
 
 ## Required gates
 
@@ -59,8 +88,9 @@ metrics.
   This avoids remapping live NCCL parameter buffers while still fitting Qwen3-8B
   on each 80GB H100.
 - Pin Megatron's production attention backend to Transformer Engine `fused` for
-  CP2/P2P. Backend auto-selection is host-dependent and would make G00/G10
-  incomparable across environments. On hosts exposing multiple CUDA runtime
+  CP2/P2P. Backend auto-selection is host-dependent and would make native and
+  historical framework-reuse runs incomparable across environments. On hosts
+  exposing multiple CUDA runtime
   majors, use Transformer Engine 2.18 or newer and select the CUDA 12 runtime
   explicitly with `CUDNN_FRONTEND_CUDART_LIB_NAME`.
 - GRPO, BF16, `top_p=1.0`, temperature 1, no dropout, fixed training and rollout seeds.
@@ -149,7 +179,7 @@ reward and speed are secondary quality and cost measurements.
 The sealed 200-step G10/G11 results, per-step data, reproducible plotting
 script, and consistency figures are published in
 [`results/convergence_s1234_g10_g11`](results/convergence_s1234_g10_g11/README.md).
-G00 and G01 were paused, so the publication is explicitly a two-arm interim
+The native and consistency runs were paused, so the publication is explicitly a two-arm interim
 result rather than a completed four-arm ablation. Performance is omitted
 because the immutable G11 and final G10 runs used different repository and
 Transformer Engine revisions.
