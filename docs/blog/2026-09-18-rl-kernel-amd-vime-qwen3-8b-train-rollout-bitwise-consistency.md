@@ -439,15 +439,15 @@ On the strict path, both `mismatch_count` and `max_abs_diff` remained at 0 for a
 
 ### Training Trajectories over 200 Steps
 
-Figure 1 plots raw reward, reference KL loss, train/rollout mismatch count, and maximum absolute Δlogp on the same 200-step timeline. RL-Kernel's strict path maintains zero mismatch throughout, while vime's native path exhibits mismatch at every step.
+Figure 1 shows the train/rollout mismatch count and maximum absolute Δlogp over the same 200 training steps. RL-Kernel's strict path keeps the mismatch count at zero throughout, while native vime has mismatches at every step.
 
 <p align="center" markdown="1">
-[![CUDA training trajectories and train-rollout consistency][image30]{ width="92%" }][image30]
+[![CUDA train-rollout mismatch count and maximum absolute logprob difference][image30]{ width="92%" }][image30]
 <br>
-*Figure 1: Training trajectories and consistency for native vime and vime + RL-Kernel.*
+*Figure 1: Train-rollout consistency for native vime and vime + RL-Kernel on CUDA.*
 </p>
 
-These signals occur together over the same period, consistent with the continued accumulation of train-rollout mismatch, and provide end-to-end evidence for strict alignment. Specifically, the results demonstrate that vime + RL-Kernel can maintain both verifiable bitwise consistency and a more stable training trajectory across all 200 steps.
+These patterns appear over the same period and are consistent with a continued buildup of train-rollout mismatch. Together, they provide end-to-end evidence for strict alignment. The results show that vime + RL-Kernel maintains both verifiable bitwise consistency and a more stable training trajectory throughout all 200 steps.
 
 Figure 2 isolates the mean absolute train/rollout logprob difference over 200 steps. For vime + RL-Kernel, it remains at 0 throughout.
 
@@ -492,15 +492,15 @@ On the strict path, both `mismatch_count` and `max_abs_diff` remained at 0 for a
 
 ### Training Trajectories over 200 Steps
 
-Figure 4 plots raw reward, reference KL loss, train/rollout mismatch count, and maximum absolute Δlogp on the same 200-step timeline. RL-Kernel's strict path maintains zero mismatch throughout, while vime's native path exhibits mismatch at every step.
+Figure 4 shows the train/rollout mismatch count and maximum absolute Δlogp over the same 200 training steps. RL-Kernel's strict path keeps the mismatch count at zero throughout, while native vime has mismatches at every step.
 
 <p align="center" markdown="1">
-[![ROCm training trajectories and train-rollout consistency][image33]{ width="92%" }][image33]
+[![ROCm train-rollout mismatch count and maximum absolute logprob difference][image33]{ width="92%" }][image33]
 <br>
-*Figure 4: Training trajectories and consistency for native vime and vime + RL-Kernel.*
+*Figure 4: Train-rollout consistency for native vime and vime + RL-Kernel on ROCm.*
 </p>
 
-These signals occur together over the same period, consistent with the continued accumulation of train-rollout mismatch, and provide end-to-end evidence for strict alignment. Specifically, the results demonstrate that vime + RL-Kernel can maintain both verifiable bitwise consistency and a more stable training trajectory across all 200 steps.
+These patterns appear over the same period and are consistent with a continued buildup of train-rollout mismatch. Together, they provide end-to-end evidence for strict alignment. The results show that vime + RL-Kernel maintains both verifiable bitwise consistency and a more stable training trajectory throughout all 200 steps.
 
 Figure 5 isolates the mean absolute train/rollout logprob difference over 200 steps. For vime + RL-Kernel, it remains at 0 throughout.
 
