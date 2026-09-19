@@ -83,19 +83,19 @@ The current end-to-end path uses Qwen3-8B Dense with vime.
 
 ### CUDA H100
 
-[![Qwen3-8B H100 train/rollout mismatch count and maximum absolute LogP difference over 200 steps](./docs/assets/blog/rl-kernel-v0.1.0/cuda-training-consistency.png)](./docs/blog/2026-09-18-rl-kernel-amd-vime-qwen3-8b-train-rollout-bitwise-consistency.md#progress-on-bitwise-alignment-with-cuda)
+<img src="./docs/assets/blog/rl-kernel-v0.1.0/cuda-training-consistency.png" alt="Qwen3-8B H100 train/rollout mismatch count and maximum absolute LogP difference over 200 steps">
 
-[![Qwen3-8B H100 mean absolute train/rollout LogP difference over 200 steps](./docs/assets/blog/rl-kernel-v0.1.0/cuda-mean-logprob-difference.png)](./docs/blog/2026-09-18-rl-kernel-amd-vime-qwen3-8b-train-rollout-bitwise-consistency.md#progress-on-bitwise-alignment-with-cuda)
+<img src="./docs/assets/blog/rl-kernel-v0.1.0/cuda-mean-logprob-difference.png" alt="Qwen3-8B H100 mean absolute train/rollout LogP difference over 200 steps">
 
-[![Qwen3-8B H100 200-step performance matrix](./docs/assets/blog/rl-kernel-v0.1.0/cuda-performance.png)](./docs/blog/2026-09-18-rl-kernel-amd-vime-qwen3-8b-train-rollout-bitwise-consistency.md#progress-on-bitwise-alignment-with-cuda)
+<img src="./docs/assets/blog/rl-kernel-v0.1.0/cuda-performance.png" alt="Qwen3-8B H100 200-step performance matrix">
 
 ### ROCm MI300X
 
-[![Qwen3-8B ROCm train/rollout mismatch count and maximum absolute LogP difference over 200 steps](./docs/assets/blog/rl-kernel-v0.1.0/rocm-training-consistency.png)](./docs/blog/2026-09-18-rl-kernel-amd-vime-qwen3-8b-train-rollout-bitwise-consistency.md#progress-on-bitwise-alignment-with-rocm)
+<img src="./docs/assets/blog/rl-kernel-v0.1.0/rocm-training-consistency.png" alt="Qwen3-8B ROCm train/rollout mismatch count and maximum absolute LogP difference over 200 steps">
 
-[![Qwen3-8B ROCm mean absolute train/rollout LogP difference over 200 steps](./docs/assets/blog/rl-kernel-v0.1.0/rocm-mean-logprob-difference.png)](./docs/blog/2026-09-18-rl-kernel-amd-vime-qwen3-8b-train-rollout-bitwise-consistency.md#progress-on-bitwise-alignment-with-rocm)
+<img src="./docs/assets/blog/rl-kernel-v0.1.0/rocm-mean-logprob-difference.png" alt="Qwen3-8B ROCm mean absolute train/rollout LogP difference over 200 steps">
 
-[![Qwen3-8B ROCm MI300X 200-step performance matrix](./docs/assets/blog/rl-kernel-v0.1.0/rocm-performance.png)](./docs/blog/2026-09-18-rl-kernel-amd-vime-qwen3-8b-train-rollout-bitwise-consistency.md#progress-on-bitwise-alignment-with-rocm)
+<img src="./docs/assets/blog/rl-kernel-v0.1.0/rocm-performance.png" alt="Qwen3-8B ROCm MI300X 200-step performance matrix">
 
 ## Hardware Support
 
@@ -118,38 +118,32 @@ Use a compatible vime environment on an eight-GPU H100 or MI300X node.
 Clone the project and follow the [installation guide](./docs/getting_started/installation.md)
 for your CUDA or ROCm build:
 
-```bash
-git clone https://github.com/RL-Align/RL-Kernel.git
+git clone https://github.com/RL-Align/RL-Kernel.git<br>
 cd RL-Kernel
-```
 
 Complete the one-time [CUDA setup](./docs/usage/qwen3-vime-consistency.md#cuda-quick-path)
 or [ROCm setup](./docs/usage/qwen3-vime-consistency.md#rocm-mi300x-and-gfx942).
-Save the backend, Python, framework, model and data paths in `.rlk-profile.json`
-or select a profile with `RLK_REPRO_PROFILE`. No launcher edits are needed.
+Save the backend, Python, framework, model and data paths in .rlk-profile.json
+or select a profile with RLK_REPRO_PROFILE. No launcher edits are needed.
 Both backends then use the same command:
 
-```bash
 ./rlk run --tp 2 --rollout-tp 4 --temperature 0.7 --top-p 0.95 --steps 200
-```
 
 Training TP and rollout TP are independent: choose 1, 2, 4 or 8. Training CP
-defaults to `8 / TP`; set `--cp` explicitly if needed. `run` waits, validates
+defaults to 8 / TP; set --cp explicitly if needed. run waits, validates
 train/rollout LogP, and defaults to consistency mode without rollout-logprob reuse.
-Add `--mode native` for a native comparison, or replace `run` with `plan` to
+Add --mode native for a native comparison, or replace run with plan to
 inspect the command without launching a job.
 
 On CUDA, rollout CP and top-k are configurable too; this short check performs
 two real updates and validates their artifacts:
 
-```bash
 ./rlk verify --tp 1 --rollout-tp 1 --rollout-cp 8 --temperature 0.7 --top-p 0.95 --top-k -1
-```
 
-Rollout `TP × CP` must divide eight. CUDA accepts top-k `-1` (disabled) or a
-positive integer, and temperature `0` for greedy sampling. ROCm currently
-requires top-k `-1` and positive temperature. ROCm rollout CP > 1 remains
-unvalidated, and `verify` is CUDA-only. See the
+Rollout TP × CP must divide eight. CUDA accepts top-k -1 (disabled) or a
+positive integer, and temperature 0 for greedy sampling. ROCm currently
+requires top-k -1 and positive temperature. ROCm rollout CP > 1 remains
+unvalidated, and verify is CUDA-only. See the
 [CUDA/ROCm support table](./docs/usage/cuda-rocm-consistency-audit.md#common-command)
 and [measured H100 results](./docs/usage/h100-matrix-validation.md) for exact coverage.
 
