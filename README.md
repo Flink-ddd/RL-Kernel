@@ -83,9 +83,9 @@ The current end-to-end path uses Qwen3-8B Dense with vime.
 
 ### CUDA H100
 
-[![Qwen3-8B H100 train/rollout mismatch count and maximum absolute LogP difference over 200 steps](./docs/assets/readme/cuda-h100-consistency.png)](./docs/blog/2026-09-18-rl-kernel-amd-vime-qwen3-8b-train-rollout-bitwise-consistency.md)
+[![Qwen3-8B H100 train/rollout mismatch count and maximum absolute LogP difference over 200 steps](./docs/assets/blog/rl-kernel-v0.1.0/cuda-training-consistency.png)](./docs/blog/2026-09-18-rl-kernel-amd-vime-qwen3-8b-train-rollout-bitwise-consistency.md#progress-on-bitwise-alignment-with-cuda)
 
-[![Qwen3-8B H100 mean absolute train/rollout LogP difference over 200 steps](./docs/assets/readme/cuda-h100-mean-logp-diff.png)](./docs/blog/2026-09-18-rl-kernel-amd-vime-qwen3-8b-train-rollout-bitwise-consistency.md)
+[![Qwen3-8B H100 mean absolute train/rollout LogP difference over 200 steps](./docs/assets/blog/rl-kernel-v0.1.0/cuda-mean-logprob-difference.png)](./docs/blog/2026-09-18-rl-kernel-amd-vime-qwen3-8b-train-rollout-bitwise-consistency.md#progress-on-bitwise-alignment-with-cuda)
 
 These 200-step curves compare vime with vime + RL-Kernel on H100 without
 rollout-logprob reuse. The separate [14-configuration H100 matrix](./docs/usage/h100-matrix-validation.md)
@@ -93,9 +93,9 @@ checks two real updates per configuration, including rollout CP2/4/8.
 
 ### ROCm MI300X
 
-[![Qwen3-8B ROCm aligned training, reward, and train–rollout consistency curves](./docs/assets/readme/rocm-mi300x-aligned-consistency.png)](https://github.com/RL-Align/RL-Kernel/pull/418)
+[![Qwen3-8B ROCm train/rollout mismatch count and maximum absolute LogP difference over 200 steps](./docs/assets/blog/rl-kernel-v0.1.0/rocm-training-consistency.png)](./docs/blog/2026-09-18-rl-kernel-amd-vime-qwen3-8b-train-rollout-bitwise-consistency.md#progress-on-bitwise-alignment-with-rocm)
 
-[![Qwen3-8B ROCm aligned mean absolute train–rollout LogP difference on MI300X](./docs/assets/readme/rocm-mi300x-aligned-mean-logp-diff.png)](https://github.com/RL-Align/RL-Kernel/pull/418)
+[![Qwen3-8B ROCm mean absolute train/rollout LogP difference over 200 steps](./docs/assets/blog/rl-kernel-v0.1.0/rocm-mean-logprob-difference.png)](./docs/blog/2026-09-18-rl-kernel-amd-vime-qwen3-8b-train-rollout-bitwise-consistency.md#progress-on-bitwise-alignment-with-rocm)
 
 ## Hardware Support
 
