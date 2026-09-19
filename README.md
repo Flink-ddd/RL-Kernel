@@ -127,7 +127,9 @@ Save the backend, Python, framework, model and data paths in .rlk-profile.json
 or select a profile with RLK_REPRO_PROFILE. No launcher edits are needed.
 Both backends then use the same command:
 
+```bash
 ./rlk run --tp 2 --rollout-tp 4 --temperature 0.7 --top-p 0.95 --steps 200
+```
 
 Training TP and rollout TP are independent: choose 1, 2, 4 or 8. Training CP
 defaults to 8 / TP; set --cp explicitly if needed. run waits, validates
@@ -138,7 +140,9 @@ inspect the command without launching a job.
 On CUDA, rollout CP and top-k are configurable too; this short check performs
 two real updates and validates their artifacts:
 
+```bash
 ./rlk verify --tp 1 --rollout-tp 1 --rollout-cp 8 --temperature 0.7 --top-p 0.95 --top-k -1
+```
 
 Rollout TP × CP must divide eight. CUDA accepts top-k -1 (disabled) or a
 positive integer, and temperature 0 for greedy sampling. ROCm currently
