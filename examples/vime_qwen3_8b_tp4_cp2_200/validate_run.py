@@ -27,7 +27,6 @@ EXPECTED_FIXED_TOPOLOGY = {
     "rollout_gpus": 8,
     "pp": 1,
     "colocate": True,
-    "offload_train": False,
     "offload_rollout": True,
 }
 CASE_FIELDS = {
@@ -74,6 +73,12 @@ def _validate_topology(value: Any) -> list[str]:
     rollout_gpus_per_engine = value.get("rollout_gpus_per_engine")
     rollout_cp = value.get("rollout_cp", 1)
     rollout_tp = value.get("rollout_tp", rollout_gpus_per_engine)
+    expected_offload = tensor_parallel == 1 and rollout_tp == 1
+    if not isinstance(value.get("offload_train"), bool) or value["offload_train"] != expected_offload:
+        errors.append(
+            f"manifest topology offload_train={value.get('offload_train')!r}, "
+            f"expected {expected_offload!r} for training TP{tensor_parallel}/rollout TP{rollout_tp}"
+        )
     rollout_engines = value.get("rollout_engines")
     if (
         not isinstance(rollout_gpus, int)
@@ -91,7 +96,7 @@ def _validate_topology(value: Any) -> list[str]:
         )
     elif rollout_engines != rollout_gpus // rollout_gpus_per_engine:
         errors.append(
-            "manifest rollout_engines does not match " "rollout_gpus // rollout_gpus_per_engine"
+            "manifest rollout_engines does not match rollout_gpus // rollout_gpus_per_engine"
         )
     return errors
 
@@ -136,7 +141,17 @@ def _parse_runtime_records(log_text: str) -> dict[str, dict[int, dict[str, Any]]
         if not match:
             continue
         try:
-            value = ast.literal_eval(match.group(3))
+            # Keep nonfinite records so the acceptance gate can explain the
+            # failure instead of silently dropping an entire training step.
+            tree = ast.parse(match.group(3), mode="eval")
+
+            class NonfiniteConstants(ast.NodeTransformer):
+                def visit_Name(self, node):
+                    if node.id in {"inf", "nan"}:
+                        return ast.copy_location(ast.Constant(float(node.id)), node)
+                    return node
+
+            value = ast.literal_eval(NonfiniteConstants().visit(tree))
         except (SyntaxError, ValueError):
             continue
         if isinstance(value, dict):
@@ -181,6 +196,41 @@ def _load_readbacks(directory: Path) -> list[dict[str, Any]]:
     if not values:
         raise ValueError(f"no framework readbacks found in {directory}")
     return values
+
+
+def _validate_pcp_readbacks(readbacks, topology, arm):
+    cp = int(topology.get("rollout_cp", 1))
+    if cp == 1 or _side(str(arm[CASE_FIELDS["attention"]]), "rollout") != "rl_kernel":
+        return {"passed": True, "required": False, "errors": []}
+    tp = int(topology["rollout_tp"])
+    expected_per_rank = tp * int(topology["rollout_engines"])
+    counts = [0] * cp
+    errors = []
+    for value in readbacks:
+        if value.get("framework") != "vllm" or value.get("target") != "rollout":
+            continue
+        record = value.get("operators", {}).get("attention", {})
+        if not int(record.get("call_count", 0)):
+            continue
+        execution = record.get("provenance", {}).get("execution", {})
+        rank = execution.get("cp_rank")
+        required = {
+            "cp_world_size": cp, "tp_world_size": tp,
+            "kv_storage": "token_sharded",
+            "attention_queries": "disjoint_cp_partitions",
+            "attention_merge": "rank_ordered_output_gather_no_reduction",
+            "fallback": False,
+        }
+        if any(execution.get(key) != expected for key, expected in required.items()):
+            errors.append(f"PCP runtime layout differs from manifest in {value.get('_path')}")
+        elif not isinstance(rank, int) or not 0 <= rank < cp:
+            errors.append("PCP runtime has an invalid rank")
+        else:
+            counts[rank] += 1
+    if any(count < expected_per_rank for count in counts):
+        errors.append(f"PCP rank coverage {counts}, expected at least {expected_per_rank} each")
+    return {"passed": not errors, "required": True, "errors": errors,
+            "cp_rank_worker_counts": counts, "expected_workers_per_cp_rank": expected_per_rank}
 
 
 def _reported_backend_ids(value: Any) -> set[str]:
@@ -332,6 +382,9 @@ def _validate_runtime_logprobs(
     rows: list[dict[str, Any]] = []
     for step in sorted(records):
         record = records[step]
+        for key, value in record.items():
+            if isinstance(value, (int, float)) and not math.isfinite(value):
+                errors.append(f"step {step} {key} is nonfinite: {value}")
         mismatch = _numeric(
             record.get("train/train_current_rollout_logprob_mismatch_count"),
             f"step {step} mismatch_count",
@@ -367,8 +420,8 @@ def _validate_runtime_logprobs(
                 "vime_mean_active_tokens_per_sample": numel,
             }
         )
-    if len(rows) != expected_rounds:
-        errors.append(f"observed {len(rows)} train steps, expected {expected_rounds}")
+    if sorted(records) != list(range(expected_rounds)):
+        errors.append(f"observed steps {sorted(records)}, expected 0..{expected_rounds - 1}")
     bitwise_zero = bool(rows) and all(
         row["bitwise_mismatch_count"] == 0.0 and row["max_abs_dlogp"] == 0.0 for row in rows
     )
@@ -419,12 +472,14 @@ def validate_run(run_dir: Path) -> dict[str, Any]:
     records = _parse_runtime_records(log_text)
     require_zero = all(str(arm[CASE_FIELDS[module]]) == "R/R" for module in MODULES)
     cudagraph = _validate_cudagraph(log_text, manifest)
-    readbacks = _validate_readbacks(_load_readbacks(run_dir / "readbacks"), arm, log_text)
+    raw_readbacks = _load_readbacks(run_dir / "readbacks")
+    readbacks = _validate_readbacks(raw_readbacks, arm, log_text)
+    pcp = _validate_pcp_readbacks(raw_readbacks, manifest["topology"], arm)
     runtime_logprobs = _validate_runtime_logprobs(
         records["step"],
         int(manifest["num_rollout"]),
         int(manifest["batching"]["global_batch_size"]),
-        False,
+        require_zero,
     )
     logprobs = _compare_mismatch_sidecars(
         run_dir / "mismatch-sidecars",
@@ -432,10 +487,36 @@ def validate_run(run_dir: Path) -> dict[str, Any]:
         tensor_parallel_size=int(manifest["topology"]["tp"]),
         context_parallel_size=int(manifest["topology"]["cp"]),
     )
-    global_errors = []
+    global_errors = list(runtime_logprobs["errors"])
+    status_path = run_dir / "ray-status.txt"
+    status_text = status_path.read_text(errors="replace") if status_path.is_file() else ""
+    status_text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", status_text)
+    if not re.search(r"\bSUCCEEDED\b", status_text, re.IGNORECASE):
+        global_errors.append("final Ray job status is missing or is not SUCCEEDED")
+    expected_samples = int(manifest["num_rollout"]) * int(manifest["batching"]["global_batch_size"])
+    if logprobs.get("sample_count") != expected_samples:
+        global_errors.append(
+            f"sidecar samples {logprobs.get('sample_count')} != expected {expected_samples}"
+        )
+    expected_tokens = runtime_logprobs["total_active_token_exposure"]
+    if logprobs.get("element_count") != expected_tokens:
+        global_errors.append(
+            f"sidecar tokens {logprobs.get('element_count')} != runtime exposure {expected_tokens}"
+        )
     algorithm = manifest.get("algorithm", {})
     if not isinstance(algorithm, Mapping) or algorithm.get("advantage_estimator") != "grpo":
         global_errors.append("manifest does not explicitly select GRPO")
+    if isinstance(algorithm, Mapping) and algorithm.get("require_updates"):
+        weight_records = [_load_json(p) for p in sorted((run_dir / "weight-audit").glob("*.json"))]
+        if len(weight_records) < 2 or len({r.get("sha256") for r in weight_records}) < 2:
+            global_errors.append("exported weight tensor did not demonstrate a real update")
+        update_rows = list(records["step"].values())
+        if len(update_rows) < 2:
+            global_errors.append("weight-update verification requires at least two steps")
+        if not update_rows or any(float(r.get("train/lr-pg_0", 0)) <= 0 for r in update_rows):
+            global_errors.append("weight-update verification requires positive learning rates")
+        if not any(float(r.get("train/grad_norm", 0)) > 0 for r in update_rows):
+            global_errors.append("weight-update verification observed no nonzero gradient")
     train_command = manifest.get("train_command", [])
     expected_algorithm_pair = ["--advantage-estimator", "grpo"]
     if not isinstance(train_command, list) or not any(
@@ -472,8 +553,14 @@ def validate_run(run_dir: Path) -> dict[str, Any]:
                 global_errors.append(f"train command does not contain {flag} {value}")
         if "--colocate" not in train_command:
             global_errors.append("train command does not enable colocated execution")
-        if "--no-offload-train" not in train_command:
-            global_errors.append("train command does not keep the actor resident")
+        offload_flag = "--offload-train" if topology.get("offload_train") else "--no-offload-train"
+        if offload_flag not in train_command:
+            global_errors.append(f"train command does not contain {offload_flag}")
+        if (
+            not arm.get("framework_use_rollout_logprobs")
+            and "--use-rollout-logprobs" in train_command
+        ):
+            global_errors.append("no-reuse arm unexpectedly enables rollout-logprob reuse")
         if "--offload-rollout" not in train_command:
             global_errors.append("train command does not offload rollout during training")
         training_logp_implementation = _side(str(arm["logp_case"]), "training")
@@ -514,11 +601,17 @@ def validate_run(run_dir: Path) -> dict[str, Any]:
         "run_id": manifest.get("run_id"),
         "group": arm.get("group"),
         "passed": bool(
-            cudagraph["passed"] and readbacks["passed"] and logprobs["passed"] and not global_errors
+            cudagraph["passed"]
+            and readbacks["passed"]
+            and pcp["passed"]
+            and logprobs["passed"]
+            and runtime_logprobs["passed"]
+            and not global_errors
         ),
         "errors": global_errors,
         "cudagraph": cudagraph,
         "runtime_readbacks": readbacks,
+        "pcp_execution": pcp,
         "train_rollout_logprob": logprobs,
         "runtime_scalar_logprob": runtime_logprobs,
         "offline_tensor_comparison": _inspect_offline_dumps(run_dir / "train-data"),

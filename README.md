@@ -83,9 +83,13 @@ The current end-to-end path uses Qwen3-8B Dense with vime.
 
 ### CUDA H100
 
-[![Qwen3-8B CUDA training, reward, and train–rollout consistency curves](./examples/vime_qwen3_8b_tp4_cp2_200/results/scale_reference_s1234_g10_g11_optimized/consistency-reward.png)](https://github.com/RL-Align/RL-Kernel/pull/377)
+[![Qwen3-8B H100 train/rollout mismatch count and maximum absolute LogP difference over 200 steps](./docs/assets/readme/cuda-h100-consistency.png)](./docs/blog/2026-09-18-rl-kernel-amd-vime-qwen3-8b-train-rollout-bitwise-consistency.md)
 
-[![Qwen3-8B CUDA mean absolute train–rollout LogP difference on NVIDIA H100](./examples/vime_qwen3_8b_tp4_cp2_200/results/scale_reference_s1234_g10_g11_optimized/mean-logp-diff.png)](https://github.com/RL-Align/RL-Kernel/pull/377)
+[![Qwen3-8B H100 mean absolute train/rollout LogP difference over 200 steps](./docs/assets/readme/cuda-h100-mean-logp-diff.png)](./docs/blog/2026-09-18-rl-kernel-amd-vime-qwen3-8b-train-rollout-bitwise-consistency.md)
+
+These 200-step curves compare vime with vime + RL-Kernel on H100 without
+rollout-logprob reuse. The separate [14-configuration H100 matrix](./docs/usage/h100-matrix-validation.md)
+checks two real updates per configuration, including rollout CP2/4/8.
 
 ### ROCm MI300X
 
@@ -110,80 +114,44 @@ hardware models is in progress.
 
 ## Quick Start
 
-Install Python 3.10 or newer, a PyTorch build matching your accelerator runtime, and the
-corresponding CUDA or ROCm compiler toolchain. Then clone RL-Kernel:
+Use a compatible vime environment on an eight-GPU H100 or MI300X node.
+Clone the project and follow the [installation guide](./docs/getting_started/installation.md)
+for your CUDA or ROCm build:
 
 ```bash
 git clone https://github.com/RL-Align/RL-Kernel.git
 cd RL-Kernel
 ```
 
-For the Qwen3-8B train–rollout commands and setup for vime with RL-Kernel on CUDA and
-ROCm, see the [reproduction scripts](https://github.com/RL-Align/RL-Kernel/blob/main/examples/vime_qwen3_8b_tp4_cp2_200/REPRODUCTION.md).
-
-Run the user-facing CUDA comparison from a compatible VIME environment. Set
-the local Hugging Face checkpoint once; no example script edits are required:
-
-```bash
-python3 -m pip install -e .
-export RLK_REPRO_MODEL_ROOT=/models/Qwen3-8B
-rlk-repro prepare --workspace /data/rlk-repro --download-data --convert-checkpoint
-ray start --head --include-dashboard=true --dashboard-host=127.0.0.1 \
-  --num-gpus=8 --object-store-memory=200000000000
-rlk-repro doctor --workspace /data/rlk-repro
-rlk-repro run --workspace /data/rlk-repro --mode native --rollouts 8 --wait
-rlk-repro run --workspace /data/rlk-repro --mode consistency --rollouts 8 --wait
-```
-
-Read the [Qwen3-8B train–rollout consistency guide](./docs/usage/qwen3-vime-consistency.md)
-before a 200-step evidence run; it lists the exact hardware/runtime contract,
-Ray sizing, ROCm commands, topology evidence levels, validation commands, and
-supported customization points.
-
-### NVIDIA CUDA
-
-Build against a visible NVIDIA GPU. Set TORCH_CUDA_ARCH_LIST when you want to pin the
-target architecture instead of relying on device detection.
+Complete the one-time [CUDA setup](./docs/usage/qwen3-vime-consistency.md#cuda-quick-path)
+or [ROCm setup](./docs/usage/qwen3-vime-consistency.md#rocm-mi300x-and-gfx942).
+Save the backend, Python, framework, model and data paths in `.rlk-profile.json`
+or select a profile with `RLK_REPRO_PROFILE`. No launcher edits are needed.
+Both backends then use the same command:
 
 ```bash
-# NVIDIA SM90: H100, H200, GH200
-MAX_JOBS=8 \
-RL_KERNEL_REQUIRE_EXT=1 \
-TORCH_CUDA_ARCH_LIST="9.0+PTX" \
-  python3 -m pip install --no-build-isolation --no-deps -e .
+./rlk run --tp 2 --rollout-tp 4 --temperature 0.7 --top-p 0.95 --steps 200
 ```
 
-The CUDA build targets SM90 and has been tested on an NVIDIA H100 80GB HBM3. H100, H200,
-and GH200 use SM90. Support for other CUDA architectures is in progress.
+Training TP and rollout TP are independent: choose 1, 2, 4 or 8. Training CP
+defaults to `8 / TP`; set `--cp` explicitly if needed. `run` waits, validates
+train/rollout LogP, and defaults to consistency mode without rollout-logprob reuse.
+Add `--mode native` for a native comparison, or replace `run` with `plan` to
+inspect the command without launching a job.
 
-Verify the loaded extension, GPU, SM capability, and required native symbol:
+On CUDA, rollout CP and top-k are configurable too; this short check performs
+two real updates and validates their artifacts:
 
 ```bash
-python3 -c "import torch, rl_engine._C as C; print('GPU:', torch.cuda.get_device_name(0)); print('Capability:', torch.cuda.get_device_capability(0)); print('Extension:', C.__file__); print('fused_logp:', hasattr(C, 'fused_logp')); assert hasattr(C, 'fused_logp'); print('H100 build: PASS')"
+./rlk verify --tp 1 --rollout-tp 1 --rollout-cp 8 --temperature 0.7 --top-p 0.95 --top-k -1
 ```
 
-### AMD ROCm
-
-The gfx942 build targets AMD Instinct MI300A, MI300X, and MI325X:
-
-```bash
-PYTORCH_ROCM_ARCH=gfx942 python3 setup.py develop
-```
-
-Verify the ROCm environment and required native symbol:
-
-```bash
-python3 scripts/check_rocm_env.py
-python3 -c "import torch, rl_engine._C as C; print('GPU:', torch.cuda.get_device_name(0)); print('HIP:', torch.version.hip); print('Extension:', C.__file__); print('fused_logp:', hasattr(C, 'fused_logp')); assert hasattr(C, 'fused_logp'); print('MI300X build: PASS')"
-```
-
-The extension and environment checks have been tested on AMD Instinct MI300X. Support for
-other ROCm architectures is in progress.
-
-For CPU-only or pure-Python development, use an editable pip installation. Ascend has
-partial operator support on dav_c220 with the dav-2201 target. Moore Threads support is
-in progress. See the [installation guide](./docs/getting_started/installation.md) for
-backend dependencies and troubleshooting.
+Rollout `TP × CP` must divide eight. CUDA accepts top-k `-1` (disabled) or a
+positive integer, and temperature `0` for greedy sampling. ROCm currently
+requires top-k `-1` and positive temperature. ROCm rollout CP > 1 remains
+unvalidated, and `verify` is CUDA-only. See the
+[CUDA/ROCm support table](./docs/usage/cuda-rocm-consistency-audit.md#common-command)
+and [measured H100 results](./docs/usage/h100-matrix-validation.md) for exact coverage.
 
 ## Community and Contributions
 

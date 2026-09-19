@@ -421,6 +421,31 @@ def test_vllm_rocm_lm_head_cache_survives_level_two_buffer_restore():
     assert vllm_runtime._validated_lm_head_weight_cache(layer) is state.weight_t
 
 
+@pytest.mark.parametrize("real_vocab,padded_vocab", [(6, 8), (151936, 152064), (151936, 152576)])
+def test_qwen_padding_preserves_canonical_vocab(monkeypatch, real_vocab, padded_vocab):
+    monkeypatch.setenv("RL_KERNEL_VLLM_REAL_VOCAB_SIZE", str(real_vocab))
+    monkeypatch.setenv("RL_KERNEL_VLLM_PADDED_VOCAB_SIZE", str(padded_vocab))
+
+    class Embedding:
+        def weight_loader(self, param, loaded_weight):
+            pass
+
+    class Head(Embedding):
+        def __init__(self, num_embeddings, *, org_num_embeddings, padding_size):
+            self.org_vocab_size = org_num_embeddings
+            self.num_embeddings_padded = (
+                (num_embeddings + padding_size - 1) // padding_size * padding_size
+            )
+
+    module_name = "vllm.model_executor.layers.vocab_parallel_embedding"
+    module = ModuleType(module_name)
+    module.ParallelLMHead = Head
+    module.VocabParallelEmbedding = Embedding
+    monkeypatch.setitem(sys.modules, module_name, module)
+    vllm_runtime._patch_qwen_lm_head_padding()
+    assert Head(real_vocab).num_embeddings_padded == padded_vocab
+
+
 def test_qwen_weight_loader_invalidates_cache_before_data_write(
     monkeypatch,
 ):

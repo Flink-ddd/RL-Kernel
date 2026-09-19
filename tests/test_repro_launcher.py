@@ -73,6 +73,24 @@ def test_native_command_uses_production_operator_route(tmp_path: Path):
     assert "--use-rollout-logprobs" not in command
 
 
+def test_default_logical_microbatch_budget_is_topology_invariant(tmp_path: Path):
+    for tp in (1, 2, 4, 8):
+        args = _args(tmp_path, "consistency")
+        args.tp_size, args.cp_size = tp, 8 // tp
+        paths = _resolved_paths(_profile(), args)
+        command = _runner_command(paths, _profile(), args)
+        offset = len(command) - 1 - command[::-1].index("--max-tokens-per-gpu")
+        assert int(command[offset + 1]) * args.cp_size == 1024
+
+
+def test_explicit_microbatch_budget_is_preserved(tmp_path: Path):
+    args = _args(tmp_path, "consistency")
+    args.max_tokens_per_gpu = 777
+    command = _runner_command(_resolved_paths(_profile(), args), _profile(), args)
+    offset = len(command) - 1 - command[::-1].index("--max-tokens-per-gpu")
+    assert command[offset + 1] == "777"
+
+
 def test_launcher_defaults_to_active_checkout_and_runtime(tmp_path: Path):
     profile = _profile()
     args = _args(tmp_path, "native")
@@ -81,7 +99,7 @@ def test_launcher_defaults_to_active_checkout_and_runtime(tmp_path: Path):
     repo_root = Path(__file__).parents[1].resolve()
 
     assert paths.rl_kernel_root == repo_root
-    assert paths.python == Path(sys.executable).resolve()
+    assert paths.python == Path(sys.executable).absolute()
     assert Path(command[1]) == repo_root / "examples/vime_qwen3_8b_tp4_cp2_200/run_arm.py"
     assert command[command.index("--ray-address") + 1] == "http://127.0.0.1:8265"
     extra_paths = [
@@ -112,6 +130,106 @@ def test_non_reference_actor_topology_runs_without_an_opt_in_flag(tmp_path: Path
     command = _runner_command(paths, profile, args)
     assert command[command.index("--tp-size") + 1] == "8"
     assert command[command.index("--cp-size") + 1] == "1"
+
+
+def test_tp1_cuda_uses_memory_safe_vllm_default(tmp_path: Path):
+    profile = _profile()
+    args = build_parser().parse_args(
+        [
+            "plan",
+            "--workspace",
+            str(tmp_path),
+            "--mode",
+            "consistency",
+            "--tp-size",
+            "1",
+            "--cp-size",
+            "8",
+        ]
+    )
+    paths = _resolved_paths(profile, args)
+    command = _runner_command(paths, profile, args)
+    index = len(command) - 1 - command[::-1].index("--vllm-gpu-memory-utilization")
+
+    assert command[index + 1] == "0.2"
+
+
+def test_explicit_vllm_memory_fraction_overrides_profile(tmp_path: Path):
+    profile = _profile()
+    args = build_parser().parse_args(
+        [
+            "plan",
+            "--workspace",
+            str(tmp_path),
+            "--mode",
+            "consistency",
+            "--vllm-gpu-memory-utilization",
+            "0.31",
+        ]
+    )
+    paths = _resolved_paths(profile, args)
+    command = _runner_command(paths, profile, args)
+    index = len(command) - 1 - command[::-1].index("--vllm-gpu-memory-utilization")
+
+    assert command[index + 1] == "0.31"
+
+
+def test_sampling_parameters_are_forwarded(tmp_path: Path):
+    profile = _profile()
+    args = build_parser().parse_args(
+        [
+            "plan",
+            "--workspace",
+            str(tmp_path),
+            "--mode",
+            "consistency",
+            "--rollout-temperature",
+            "0.7",
+            "--rollout-top-p",
+            "0.95",
+        ]
+    )
+    paths = _resolved_paths(profile, args)
+    command = _runner_command(paths, profile, args)
+
+    temperature_index = len(command) - 1 - command[::-1].index("--rollout-temperature")
+    top_p_index = len(command) - 1 - command[::-1].index("--rollout-top-p")
+    assert command[temperature_index + 1] == "0.7"
+    assert command[top_p_index + 1] == "0.95"
+
+
+def test_rocm_command_uses_rocm_runner_without_cuda_runtime_options(tmp_path: Path):
+    args = build_parser().parse_args(
+        [
+            "plan",
+            "--backend",
+            "rocm",
+            "--workspace",
+            str(tmp_path),
+            "--mode",
+            "consistency",
+            "--rollouts",
+            "1",
+            "--run-id",
+            "rocm-smoke",
+            "--tp-size",
+            "2",
+            "--cp-size",
+            "4",
+            "--rollout-temperature",
+            "0.7",
+            "--rollout-top-p",
+            "0.95",
+        ]
+    )
+    profile = _profile()
+    command = _runner_command(_resolved_paths(profile, args), profile, args)
+    assert command[2] == "examples.vime_rocm_attention_ablation.run_qwen3_8b"
+    assert command[command.index("--rollout-temperature") + 1] == "0.7"
+    assert command[command.index("--rollout-top-p") + 1] == "0.95"
+    assert command[command.index("--tp-size") + 1] == "2"
+    assert "--ld-library-path" not in command
+    assert "--use-rollout-logprobs" not in command
 
 
 def test_doctor_enforces_frozen_runtime_and_ray(tmp_path: Path, monkeypatch):

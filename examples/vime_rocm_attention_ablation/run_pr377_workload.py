@@ -9,7 +9,7 @@ arguments so the same script serves different machine layouts.
 Example::
 
     python -m examples.vime_rocm_attention_ablation.run_qwen3_8b \
-      --mode consistency --num-rollout 3 \
+      --mode consistency --rollouts 8 \
       --run-dir /app/model/vime-runs/mfma-rr-3round \
       --rl-kernel-root /work/RL-Kernel --vime-root /work/vime \
       --megatron-root /work/Megatron-LM-vime
@@ -18,6 +18,7 @@ Example::
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import subprocess
@@ -28,6 +29,7 @@ from pathlib import Path
 from examples.vime_rocm_attention_ablation.run import (
     MatrixConfig,
     _canonical_fingerprint,
+    _git_identity,
     _prepare_run_dir,
     build_arm_environment,
     frozen_input_manifest,
@@ -73,6 +75,11 @@ class WorkloadConfig(MatrixConfig):
 
 def sealed_manifest(config: MatrixConfig):
     value = frozen_input_manifest(config)
+    spec = importlib.util.find_spec("vllm")
+    if spec is None or spec.origin is None:
+        raise ValueError("vLLM source cannot be resolved from the active Python environment")
+    vllm_root = Path(spec.origin).resolve().parents[1]
+    value["sources"]["vllm"] = _git_identity(vllm_root)
     value["fingerprint"] = _canonical_fingerprint(
         {key: item for key, item in value.items() if key != "fingerprint"}
     )
@@ -96,7 +103,14 @@ def parse_args(argv=None):
     mode_group.add_argument("--mode", choices=["native", "consistency"])
     mode_group.add_argument("--case", choices=["P/P", "R/R"], help=argparse.SUPPRESS)
     parser.add_argument("--run-dir", type=Path, required=True)
-    parser.add_argument("--num-rollout", type=int, default=3)
+    parser.add_argument(
+        "--rollouts",
+        "--num-rollout",
+        dest="num_rollout",
+        type=int,
+        default=200,
+        help="training/rollout steps; --num-rollout remains a compatibility alias",
+    )
     parser.add_argument("--rl-kernel-root", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument(
         "--vime-root", type=Path, default=Path(os.environ.get("VIME_ROOT", "/work/vime"))
@@ -124,6 +138,14 @@ def parse_args(argv=None):
     parser.add_argument("--tp-size", type=int, default=4)
     parser.add_argument("--cp-size", type=int, default=2)
     parser.add_argument("--rollout-tp-size", type=int, default=4)
+    parser.add_argument("--rollout-cp-size", type=int, default=1)
+    parser.add_argument("--rollout-temperature", type=float, default=1.0)
+    parser.add_argument("--rollout-top-p", type=float, default=1.0)
+    parser.add_argument("--rollout-top-k", type=int, default=-1)
+    parser.add_argument("--lr", type=float, default=1e-6)
+    parser.add_argument("--weight-decay", type=float, default=0.1)
+    parser.add_argument("--kl-coef", type=float, default=0.0)
+    parser.add_argument("--rollout-batch-size", type=int, default=1)
     parser.add_argument("--fixed-paged-tile", default="128")
     parser.add_argument("--paged-kv-max-tokens", default="8192")
     parser.add_argument("--vllm-gpu-memory-utilization", default="0.38")
@@ -153,14 +175,21 @@ def main(argv=None) -> int:
         tensor_parallel_size=args.tp_size,
         context_parallel_size=args.cp_size,
         rollout_tensor_parallel_size=args.rollout_tp_size,
+        rollout_context_parallel_size=args.rollout_cp_size,
         num_rollout=args.num_rollout,
-        rollout_batch_size=1,
+        rollout_batch_size=args.rollout_batch_size,
         samples_per_prompt=args.samples_per_prompt,
         global_batch_size=args.global_batch_size,
         max_response_length=args.max_response_length,
         max_tokens_per_gpu=args.max_tokens_per_gpu,
         seed=args.seed,
         rollout_seed=args.rollout_seed,
+        rollout_temperature=args.rollout_temperature,
+        rollout_top_p=args.rollout_top_p,
+        rollout_top_k=args.rollout_top_k,
+        learning_rate=args.lr,
+        weight_decay=args.weight_decay,
+        kl_coef=args.kl_coef,
         ray_port=args.ray_port,
         ray_dashboard_port=args.ray_dashboard_port,
     )
@@ -185,6 +214,7 @@ def main(argv=None) -> int:
     )
     environment.update(
         {
+            "RLK_ABLATION_USE_ROLLOUT_LOGPROBS": "0",
             "RL_KERNEL_ATTENTION_CASE": case_id,
             "RL_KERNEL_FFN_CASE": case_id,
             "RL_KERNEL_LOGP_CASE": case_id,
@@ -199,8 +229,14 @@ def main(argv=None) -> int:
         "case_id": case_id,
         "topology_evidence": (
             "reference"
-            if (args.num_gpus, args.tp_size, args.cp_size, args.rollout_tp_size)
-            == (8, 4, 2, 4)
+            if (
+                args.num_gpus,
+                args.tp_size,
+                args.cp_size,
+                args.rollout_tp_size,
+                args.rollout_cp_size,
+            )
+            == (8, 4, 2, 4, 1)
             else "experimental"
         ),
         "expected_implementations": CASE_IMPLEMENTATIONS[case_id],
@@ -264,6 +300,14 @@ def main(argv=None) -> int:
             "rollout_identity": rollout_identity,
             "metrics": metrics,
         }
+    expected_samples = config.num_rollout * config.rollout_batch_size * config.samples_per_prompt
+    actual_samples = report.get("metrics", {}).get("sample_count", 0)
+    if actual_samples != expected_samples:
+        report["errors"].append(
+            f"expected {expected_samples} compared samples, got {actual_samples}"
+        )
+        report["passed"] = False
+    report["expected_sample_count"] = expected_samples
     frozen_after = sealed_manifest(config)
     write_report(args.run_dir / "frozen-inputs.after.json", frozen_after)
     frozen_match = frozen_before["fingerprint"] == frozen_after["fingerprint"]
