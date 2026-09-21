@@ -14,6 +14,11 @@ def _strict_rms_norm(
 ) -> torch.Tensor:
     """Preserve PyTorch eager RMSNorm arithmetic across graph compilation."""
 
+    if torch.version.hip is not None:
+        from rl_engine.kernels.ops.rocm import rmsnorm
+
+        if rmsnorm.supports(x, weight, None):
+            return rmsnorm.forward(x, weight, eps)
     return torch.nn.functional.rms_norm(x, (x.shape[-1],), weight, eps)
 
 
@@ -36,6 +41,11 @@ def _strict_add_rms_norm(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Preserve vLLM's eager residual-add and RMSNorm contract."""
 
+    if torch.version.hip is not None:
+        from rl_engine.kernels.ops.rocm import rmsnorm
+
+        if rmsnorm.supports(x, weight, residual):
+            return rmsnorm.forward(x, weight, eps, residual)
     updated_residual = x + residual
     normalized = torch.nn.functional.rms_norm(
         updated_residual,

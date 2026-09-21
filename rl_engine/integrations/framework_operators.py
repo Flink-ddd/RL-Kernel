@@ -2332,16 +2332,27 @@ class VllmLogpOperator:
         context = None
         local_logits = None
         sampling_mask = None
+        replicated_sparse = (
+            self._strict_linear_logp and self._worker_sampler
+            and torch.version.hip is not None and not torch.is_grad_enabled()
+            and bool((sampler.sampling_states.top_p.np[
+                sampling_metadata.idx_mapping_np
+            ] != 1.0).any())
+        )
         sampling_temperature = getattr(sampling_metadata, "temperature", None)
         if sampling_temperature is None:
             sampling_temperature = 1.0
         support_temperature = sampling_temperature
-        if isinstance(sampling_temperature, torch.Tensor):
-            sampling_temperature = torch.where(
-                sampling_temperature < 1e-5, 1.0, sampling_temperature
-            )
-        elif sampling_temperature < 1e-5:
-            sampling_temperature = 1.0
+        if torch.version.hip is None:
+            # CUDA supports greedy sampling here. ROCm uses the command's
+            # positive scalar temperature inside the shared HIP scorer, as in
+            # the historical path; do not launch unused CUDA preprocessing.
+            if isinstance(sampling_temperature, torch.Tensor):
+                sampling_temperature = torch.where(
+                    sampling_temperature < 1e-5, 1.0, sampling_temperature
+                )
+            elif sampling_temperature < 1e-5:
+                sampling_temperature = 1.0
         if self._strict_linear_logp:
             context = take_rollout_linear_logp_context()
             if source_logits.ndim != 2:
@@ -2366,7 +2377,11 @@ class VllmLogpOperator:
             )
             # Preserve raw model logits before vLLM's sampler transforms its
             # input in place (temperature, penalties, and masking).
-            if available == local_vocab:
+            if replicated_sparse:
+                local_logits = source_logits[:, :context.real_vocab_size].clone(
+                    memory_format=torch.contiguous_format
+                )
+            elif available == local_vocab:
                 # Rank 0 normally has a complete local shard. Narrowing first
                 # avoids a fill kernel followed by a second device copy.
                 local_logits = source_logits.narrow(
@@ -2460,18 +2475,29 @@ class VllmLogpOperator:
                         )
                     top_p_replay = True
                 if top_p_replay:
-                    selected = self._linear_logp.from_local_logits_top_p(
-                        local_logits,
-                        token_ids,
-                        replay_ids,
-                        replay_values,
-                        tp_group=context.tp_group,
-                        vocab_start_index=context.vocab_start_index,
-                        global_vocab_size=context.global_vocab_size,
-                        real_vocab_size=context.real_vocab_size,
-                        temperature=float(os.getenv("RL_KERNEL_VLLM_TEMPERATURE", "1.0")),
-                        target="rollout",
+                    nucleus_ids = torch.where(
+                        torch.isfinite(replay_values), replay_ids,
+                        torch.full_like(replay_ids, -1),
                     )
+                    if replicated_sparse:
+                        selected = self._linear_logp.from_replicated_logits_sparse_nucleus(
+                            local_logits, token_ids, nucleus_ids,
+                            real_vocab_size=context.real_vocab_size,
+                            tp_group=context.tp_group,
+                            temperature=float(os.getenv("RL_KERNEL_VLLM_TEMPERATURE", "1.0")),
+                        )
+                    else:
+                        selected = self._linear_logp.from_local_logits_sparse_nucleus(
+                            local_logits,
+                            token_ids,
+                            nucleus_ids,
+                            tp_group=context.tp_group,
+                            vocab_start_index=context.vocab_start_index,
+                            global_vocab_size=context.global_vocab_size,
+                            real_vocab_size=context.real_vocab_size,
+                            temperature=float(os.getenv("RL_KERNEL_VLLM_TEMPERATURE", "1.0")),
+                            target="rollout",
+                        )
                 else:
                     selected = self._linear_logp.from_local_logits(
                         local_logits,
@@ -2504,7 +2530,8 @@ class VllmLogpOperator:
                 )
             strict_provenance = self._linear_logp.provenance
             expected_entrypoints = {
-                "rocm_vocab_parallel_logp_from_local_logits_tp"
+                ("sparse_nucleus_logp_from_local_logits_tp" if top_p_replay
+                 else "rocm_vocab_parallel_logp_from_local_logits_tp")
                 if torch.version.hip is not None
                 else "sm90_deterministic_logp_from_local_logits_tp"
             }
@@ -2512,6 +2539,8 @@ class VllmLogpOperator:
                 expected_entrypoints.add(
                     "sm90_deterministic_top_p_logp_from_local_logits_tp"
                 )
+            if replicated_sparse:
+                expected_entrypoints.add("sparse_nucleus_logp_from_replicated_logits")
             if (
                 strict_provenance.get("deterministic_linear_logp") is not True
                 or strict_provenance.get("actual_backend") != self._linear_logp.backend_id

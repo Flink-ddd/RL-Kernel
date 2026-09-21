@@ -66,6 +66,23 @@ def _notify_packed_inference_observers() -> None:
         callback()
 
 
+def _packed_gate_up_inference(hidden: Tensor, weight: Tensor) -> Tensor:
+    if (
+        torch.version.hip is not None
+        and hidden.dtype == torch.bfloat16
+        and 0 < hidden.size(0) <= 64
+        and hidden.size(1) > 1024
+    ):
+        from rl_engine.kernels.ops.rocm.matmul.det_gemm import det_gemm_backend
+
+        if det_gemm_backend() == "triton_mfma":
+            from rl_engine.kernels.ops.rocm.swiglu_gemm import forward
+
+            return forward(hidden, weight)
+    gate_up = det_gemm_linear(hidden, weight, native_op=_C.det_gemm_fwd_rhs_transposed)
+    return _C.swiglu_packed_forward(gate_up)
+
+
 @torch.library.custom_op("rl_kernel::qwen3_ffn_packed_inference", mutates_args=())
 def _qwen3_ffn_packed_inference(
     rmsnorm_output: Tensor,
@@ -77,12 +94,7 @@ def _qwen3_ffn_packed_inference(
     _notify_packed_inference_observers()
     input_shape = rmsnorm_output.shape
     hidden_2d = rmsnorm_output.reshape(-1, input_shape[-1]).contiguous()
-    gate_up = det_gemm_linear(
-        hidden_2d,
-        fused_gate_up_weight,
-        native_op=_C.det_gemm_fwd_rhs_transposed,
-    )
-    activated = _C.swiglu_packed_forward(gate_up)
+    activated = _packed_gate_up_inference(hidden_2d, fused_gate_up_weight)
     output = det_gemm_linear(
         activated,
         down_weight,
@@ -115,12 +127,7 @@ def _qwen3_ffn_packed_inference_to_staging(
 
     _notify_packed_inference_observers()
     hidden_2d = rmsnorm_output.reshape(-1, rmsnorm_output.shape[-1]).contiguous()
-    gate_up = det_gemm_linear(
-        hidden_2d,
-        fused_gate_up_weight,
-        native_op=_C.det_gemm_fwd_rhs_transposed,
-    )
-    activated = _C.swiglu_packed_forward(gate_up)
+    activated = _packed_gate_up_inference(hidden_2d, fused_gate_up_weight)
     det_gemm_linear(
         activated,
         down_weight,

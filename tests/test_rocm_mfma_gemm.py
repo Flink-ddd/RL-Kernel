@@ -51,8 +51,10 @@ def test_qwen_tp4_decode_config_selection():
     vocab = M.MfmaGemmConfig(16, 128, 4, waves_per_eu=2, num_stages=2, group_m=1)
 
     assert M.select_config(1, 1536, 4096) == default
-    assert M.select_config(4, 1536, 4096) == wide
-    assert M.select_config(4, 6144, 4096) == wide
+    assert M.select_config(4, 1536, 4096) == default
+    assert M.select_config(4, 6144, 4096) == default
+    assert M.select_config(16, 1536, 4096) == wide
+    assert M.select_config(16, 6144, 4096) == wide
     assert M.select_config(4, 37984, 4096) == vocab
     assert M.select_config(4, 4096, 1024) == default
     assert M.select_config(4, 4096, 3072) == default
@@ -90,6 +92,10 @@ def test_rows_are_batch_invariant(k_size, n_size):
     configs = _configs()
     for rows, start in ((1, 5), (7, 100), (8, 0), (32, 1000), (33, 4000), (129, 77), (1024, 3000)):
         sub = a[start : start + rows]
+        assert torch.equal(
+            M.mfma_linear(sub, w).view(torch.int16),
+            reference[start : start + rows].view(torch.int16),
+        )
         for config in (configs[0], configs[2], configs[8]):
             for force_split in (False, True):
                 out = M.mfma_gemm(sub, w.t(), config=config, force_split=force_split)

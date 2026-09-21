@@ -73,7 +73,7 @@ def select_config(m_size: int, n_size: int, k_size: int) -> MfmaGemmConfig:
         # N-parallel programs on its widest projections.  Keep the one-row
         # QKV case on the lower-overhead default.
         if k_size == 4096 and (n_size == 6144 or (n_size == 1536 and m_size > 1)):
-            return _QWEN_QKV_GATE_DECODE_CONFIG
+            return _DECODE_CONFIG if m_size <= 8 else _QWEN_QKV_GATE_DECODE_CONFIG
         if k_size == 4096 and n_size >= 32768:
             return _QWEN_LM_HEAD_DECODE_CONFIG
         return _DECODE_CONFIG
@@ -96,6 +96,7 @@ if _TRITON_AVAILABLE:
         BLOCK_K: tl.constexpr,
         CHUNK_K: tl.constexpr,
         EVEN_K: tl.constexpr,
+        CHUNK_UNROLL: tl.constexpr = 1,
     ):
         """Accumulate one K chunk from zero in the pinned MFMA order."""
 
@@ -104,9 +105,12 @@ if _TRITON_AVAILABLE:
         # tiles past K are never issued, so no exact-zero products enter the
         # accumulator.
         chunk_start = chunk * CHUNK_K
-        num_tiles = min(TILES_PER_CHUNK, tl.cdiv(K - chunk_start, BLOCK_K))
+        if CHUNK_UNROLL > 1:
+            num_tiles = TILES_PER_CHUNK
+        else:
+            num_tiles = min(TILES_PER_CHUNK, tl.cdiv(K - chunk_start, BLOCK_K))
         acc = tl.zeros((a_ptrs.shape[0], b_ptrs.shape[1]), dtype=tl.float32)
-        for tile in range(0, num_tiles):
+        for tile in tl.range(0, num_tiles, loop_unroll_factor=CHUNK_UNROLL):
             k0 = chunk_start + tile * BLOCK_K
             if EVEN_K:
                 a = tl.load(a_ptrs + k0 * stride_ak)
@@ -197,6 +201,7 @@ if _TRITON_AVAILABLE:
         BLOCK_K: tl.constexpr,
         CHUNK_K: tl.constexpr,
         EVEN_K: tl.constexpr,
+        CHUNK_UNROLL: tl.constexpr = 1,
     ):
         pid_n = tl.program_id(0)
         pid_m = tl.program_id(1)
@@ -209,7 +214,8 @@ if _TRITON_AVAILABLE:
         a_ptrs = a_ptr + offs_am[:, None].to(tl.int64) * stride_am + offs_k[None, :] * stride_ak
         b_ptrs = b_ptr + offs_k[:, None] * stride_bk + offs_bn[None, :].to(tl.int64) * stride_bn
         acc = _chunk_dot(
-            a_ptrs, b_ptrs, offs_k, K, chunk, stride_ak, stride_bk, BLOCK_K, CHUNK_K, EVEN_K
+            a_ptrs, b_ptrs, offs_k, K, chunk, stride_ak, stride_bk,
+            BLOCK_K, CHUNK_K, EVEN_K, CHUNK_UNROLL,
         )
         offs_cm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
         offs_cn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
@@ -351,6 +357,13 @@ def mfma_gemm(
         triton.cdiv(m_size, config.block_m),
         num_chunks,
     )
+    # Expand only complete chunks; each MFMA still consumes K in the same order.
+    chunk_unroll = 1
+    if m_size <= 8 and config == _DECODE_CONFIG and k_size % CHUNK_K == 0:
+        if (k_size, n_size) == (4096, 1536):
+            chunk_unroll = 4
+        elif (k_size, n_size) == (3072, 4096):
+            chunk_unroll = 2
     _mfma_gemm_split_partial_kernel[grid](
         a,
         b,
@@ -365,6 +378,8 @@ def mfma_gemm(
         partial.stride(0),
         partial.stride(1),
         partial.stride(2),
+        CHUNK_UNROLL=chunk_unroll,
+        schedule_hint="memory-bound-attention" if chunk_unroll == 4 else "none",
         **common,
     )
     reduce_block = 1024

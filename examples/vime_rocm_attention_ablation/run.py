@@ -561,6 +561,13 @@ def build_arm_environment(
     if case_id not in CASE_IMPLEMENTATIONS:
         raise ValueError(f"unknown case {case_id!r}")
     env = dict(os.environ if base_environment is None else base_environment)
+    # Preserve the caller's CPU allocation across HIP initialization. Some ROCm
+    # runtimes otherwise narrow every worker to the same small CPU mask.
+    # Do not force ROCm/Ray workers onto the first CPU partition.  The
+    # historical G10/G11 runs inherited the host affinity; setting ``0`` here
+    # leaves vLLM decode and sampler bookkeeping on only eight cores and is a
+    # large rollout regression.  Keep an explicit user value unchanged.
+    env.setdefault("AMD_CPU_AFFINITY", "")
     for name in _CUDA_ONLY_ENVIRONMENT:
         env.pop(name, None)
     for name in _PROXY_ENVIRONMENT:
@@ -652,6 +659,7 @@ def public_arm_environment(environment: Mapping[str, str]) -> dict[str, str]:
     """Return only experiment variables; never serialize arbitrary host secrets."""
 
     names = {
+        "AMD_CPU_AFFINITY",
         "CUDA_VISIBLE_DEVICES",
         "HIP_VISIBLE_DEVICES",
         "RL_KERNEL_ATTENTION_CASE",

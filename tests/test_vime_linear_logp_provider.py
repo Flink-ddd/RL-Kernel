@@ -9,7 +9,6 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-
 from rl_engine.integrations import framework_operators
 from rl_engine.integrations.ablation import IntegrationPlan
 from rl_engine.integrations.framework_operators import MegatronLogpOperator
@@ -96,6 +95,37 @@ def test_provider_runs_locally_with_cp2_row_metadata():
         "local_token_rows": 3,
         "is_merge_axis": False,
     }
+
+
+def test_sparse_provider_reuses_logits_temperature_and_monitoring_entropy(monkeypatch):
+    monkeypatch.setattr(torch.version, "hip", "test")
+    request = _structural_request(with_entropy=True)
+    request.with_entropy_grad = False
+    request.temperature = 0.7
+    support = torch.tensor([[0, 2], [1, 5], [0, 6]])
+    request.metadata["top_p_sparse_token_ids"] = support
+
+    class Sparse:
+        backend_id = "sparse-test"
+        provenance = {"actual_backend": "sparse-test"}
+
+        def from_local_logits(self, *args, **kwargs):
+            raise AssertionError("sparse request unexpectedly used dense scorer")
+
+        def from_local_logits_sparse_nucleus(self, logits, targets, ids, **kwargs):
+            assert logits is request.logits
+            assert ids is support
+            assert kwargs["temperature"] == 0.7
+            assert kwargs["return_entropy"]
+            return torch.ones(3), torch.full((3,), 2.0)
+
+    from rl_engine.integrations.vime.linear_logp_provider import _provider_impl
+
+    result = _provider_impl(request, linear_logp=Sparse())
+    assert torch.equal(result.logp, torch.ones(3, 1))
+    assert torch.equal(result.entropy, torch.full((3,), 2.0))
+    assert result.provenance["execution"]["top_p_replay"] is True
+    assert result.provenance["execution"]["entropy"]["with_entropy_grad"] is False
 
 
 def test_provider_entropy_preserves_vime_semantics_and_autograd():

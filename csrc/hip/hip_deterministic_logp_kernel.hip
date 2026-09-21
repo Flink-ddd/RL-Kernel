@@ -22,6 +22,7 @@
 #include <c10/hip/HIPException.h>
 #include <hip/hip_runtime.h>
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <torch/extension.h>
@@ -105,6 +106,217 @@ __device__ __forceinline__ float block_reduce_sum(float val) {
         }
     }
     return val;
+}
+
+__device__ __forceinline__ float sparse_reciprocal(float value) {
+    const uint32_t bits = __float_as_uint(value);
+    float estimate = __uint_as_float(0x7EF311C3u - bits);
+#pragma unroll
+    for (int iteration = 0; iteration < 4; ++iteration) {
+        estimate = estimate * (2.0f - value * estimate);
+    }
+    return estimate;
+}
+
+__device__ __forceinline__ float sparse_exp(float value) {
+    int exponent = __float2int_rd(value * 1.4426950408889634f + 0.5f);
+    exponent = max(-126, min(126, exponent));
+    const float exponent_float = static_cast<float>(exponent);
+    float reduced = value - exponent_float * 0.693145751953125f;
+    reduced = reduced - exponent_float * 1.428606765330187e-6f;
+    float polynomial = 2.7557319223985893e-7f;
+    polynomial = polynomial * reduced + 2.755731922398589e-6f;
+    polynomial = polynomial * reduced + 2.48015873015873e-5f;
+    polynomial = polynomial * reduced + 1.984126984126984e-4f;
+    polynomial = polynomial * reduced + 1.388888888888889e-3f;
+    polynomial = polynomial * reduced + 8.333333333333333e-3f;
+    polynomial = polynomial * reduced + 4.166666666666667e-2f;
+    polynomial = polynomial * reduced + 1.666666666666667e-1f;
+    polynomial = polynomial * reduced + 0.5f;
+    polynomial = polynomial * reduced + 1.0f;
+    polynomial = polynomial * reduced + 1.0f;
+    const float power_of_two = __uint_as_float(static_cast<uint32_t>(exponent + 127) << 23);
+    return polynomial * power_of_two;
+}
+
+__device__ __forceinline__ float sparse_log(float value) {
+    const uint32_t bits = __float_as_uint(value);
+    int exponent = static_cast<int>((bits >> 23) & 0xFFu) - 127;
+    float mantissa = __uint_as_float((bits & 0x7FFFFFu) | 0x3F800000u);
+    if (mantissa > 1.4142135623730951f) {
+        mantissa *= 0.5f;
+        ++exponent;
+    }
+    const float ratio = (mantissa - 1.0f) * sparse_reciprocal(mantissa + 1.0f);
+    const float ratio2 = ratio * ratio;
+    float series = 1.0f / 13.0f;
+    series = series * ratio2 + 1.0f / 11.0f;
+    series = series * ratio2 + 1.0f / 9.0f;
+    series = series * ratio2 + 1.0f / 7.0f;
+    series = series * ratio2 + 1.0f / 5.0f;
+    series = series * ratio2 + 1.0f / 3.0f;
+    series = series * ratio2 + 1.0f;
+    return 2.0f * ratio * series + static_cast<float>(exponent) * 0.6931471805599453f;
+}
+
+// Compact top-p replay uses a fixed serial arithmetic order per row. Keeping
+// this in the pre-built HIP extension makes vLLM and Megatron execute the same
+// code object rather than independently specializing a Triton kernel.
+template <typename scalar_t, int FixedColumns = 0>
+__global__ void __launch_bounds__(1) hip_sparse_nucleus_forward_kernel(
+    const scalar_t* __restrict__ logits,
+    const int64_t* __restrict__ ids,
+    const bool* __restrict__ valid,
+    const int64_t* __restrict__ targets,
+    const float* __restrict__ inverse_temperature,
+    float* __restrict__ result,
+    float* __restrict__ lse,
+    float* __restrict__ entropy,
+    int64_t rows, int64_t columns) {
+    const int64_t row = static_cast<int64_t>(blockIdx.x);
+    if (row >= rows) return;
+    // Match the historical 128-column code object on the common path, while
+    // preserving complete support for larger nuclei with the dynamic variant.
+    const int64_t width = FixedColumns ? FixedColumns : columns;
+    const int64_t row_offset = row * width;
+    const float scale = inverse_temperature[row];
+    float row_max = -std::numeric_limits<float>::infinity();
+#pragma unroll
+    for (int column = 0; column < width; ++column) {
+        const int64_t offset = row_offset + column;
+        if (valid[offset]) {
+            row_max = fmaxf(row_max, static_cast<float>(logits[offset]) * scale);
+        }
+    }
+    float row_sum = 0.0f;
+    float selected = 0.0f;
+#pragma unroll
+    for (int column = 0; column < width; ++column) {
+        const int64_t offset = row_offset + column;
+        if (valid[offset]) {
+            const float scaled = static_cast<float>(logits[offset]) * scale;
+            row_sum += sparse_exp(scaled - row_max);
+            if (ids[offset] == targets[row]) selected = scaled;
+        }
+    }
+    const float row_lse = row_max + sparse_log(row_sum);
+    lse[row] = row_lse;
+    result[row] = selected - row_lse;
+    // Entropy is metric-only in the sparse top-p path. Produce it while the
+    // compact nucleus is already resident instead of launching the dense
+    // full-vocabulary entropy operator a second time.
+    const float inverse_sum = sparse_reciprocal(row_sum);
+    float row_entropy = 0.0f;
+#pragma unroll
+    for (int column = 0; column < width; ++column) {
+        const int64_t offset = row_offset + column;
+        if (valid[offset]) {
+            const float scaled = static_cast<float>(logits[offset]) * scale;
+            const float probability = sparse_exp(scaled - row_max) * inverse_sum;
+            row_entropy += probability * (row_lse - scaled);
+        }
+    }
+    entropy[row] = row_entropy;
+}
+
+// Rollout already owns the all-gathered, raw vocabulary logits. Sort/deduplicate
+// its compact support and read those logits directly instead of rebuilding TP
+// shards, all-reducing disjoint values, and launching separate gather/pad ops.
+// Only preparation is fused: the historical scorer's actual compiled kernel is
+// reused for FP32 arithmetic. Wider supports use the existing
+// dynamic scorer; 128 is a fast-path geometry, never a sampling limit.
+template <typename scalar_t>
+__global__ void __launch_bounds__(128) hip_replicated_sparse_prepare_kernel(
+    const scalar_t* __restrict__ logits,
+    const int64_t* __restrict__ input_ids,
+    const int64_t* __restrict__ targets,
+    scalar_t* __restrict__ prepared,
+    int64_t* __restrict__ sorted_ids,
+    bool* __restrict__ valid_out,
+    float* __restrict__ inverse,
+    bool* __restrict__ present,
+    int64_t vocab, int64_t columns, float scale, bool transport_sum) {
+    const int row = blockIdx.x;
+    const int lane = threadIdx.x;
+    __shared__ int64_t ids[128];
+    int64_t id = lane < columns ? input_ids[row * columns + lane] : vocab;
+    ids[lane] = id >= 0 && id < vocab ? id : vocab;
+    __syncthreads();
+    for (int size = 2; size <= 128; size *= 2) {
+        for (int stride = size / 2; stride > 0; stride /= 2) {
+            const int peer = lane ^ stride;
+            const int64_t a = ids[lane], b = ids[peer];
+            const bool ascending = (lane & size) == 0;
+            const bool lower = (lane & stride) == 0;
+            const int64_t chosen = ascending == lower ? min(a, b) : max(a, b);
+            __syncthreads();
+            ids[lane] = chosen;
+            __syncthreads();
+        }
+    }
+    id = ids[lane];
+    const bool valid = id < vocab && (lane == 0 || id != ids[lane - 1]);
+    // The original disjoint-owner all-reduce adds positive zero on other ranks.
+    scalar_t value = valid ? logits[row * vocab + id] : static_cast<scalar_t>(0.0f);
+    prepared[row * 128 + lane] = transport_sum
+        ? static_cast<scalar_t>(static_cast<float>(value) + 0.0f) : value;
+    sorted_ids[row * 128 + lane] = id;
+    valid_out[row * 128 + lane] = valid;
+    if (lane == 0) {
+        bool found = false;
+        for (int column = 0; column < 128; ++column) {
+            found |= ids[column] == targets[row] && ids[column] < vocab;
+        }
+        inverse[row] = scale;
+        present[row] = found;
+    }
+}
+
+template <typename scalar_t, int BlockSize, bool FixedWidth = false>
+__global__ void __launch_bounds__(BlockSize) hip_sparse_nucleus_backward_kernel(
+    const scalar_t* __restrict__ logits,
+    const int64_t* __restrict__ ids,
+    const bool* __restrict__ valid,
+    const int64_t* __restrict__ targets,
+    const float* __restrict__ inverse_temperature,
+    const float* __restrict__ lse,
+    const float* __restrict__ grad_result,
+    const float* __restrict__ grad_lse,
+    scalar_t* __restrict__ grad_logits,
+    int64_t rows, int64_t columns) {
+    const int64_t row = static_cast<int64_t>(blockIdx.x);
+    const int lane = static_cast<int>(threadIdx.x);
+    if (row >= rows) return;
+    if constexpr (FixedWidth) {
+        // Historical 128-column backward: one element per lane, no dynamic loop.
+        const int64_t offset = row * BlockSize + lane;
+        if (!valid[offset]) {
+            grad_logits[offset] = static_cast<scalar_t>(0.0f);
+            return;
+        }
+        const float scale = inverse_temperature[row];
+        const float scaled = static_cast<float>(logits[offset]) * scale;
+        const float probability = sparse_exp(scaled - lse[row]);
+        const float selected = ids[offset] == targets[row] ? 1.0f : 0.0f;
+        const float gradient = scale *
+            (grad_result[row] * (selected - probability) + grad_lse[row] * probability);
+        grad_logits[offset] = static_cast<scalar_t>(gradient);
+        return;
+    }
+    for (int64_t column = lane; column < columns; column += BlockSize) {
+    const int64_t offset = row * columns + column;
+    if (!valid[offset]) {
+        grad_logits[offset] = static_cast<scalar_t>(0.0f);
+        continue;
+    }
+    const float scale = inverse_temperature[row];
+    const float scaled = static_cast<float>(logits[offset]) * scale;
+    const float probability = sparse_exp(scaled - lse[row]);
+    const float selected = ids[offset] == targets[row] ? 1.0f : 0.0f;
+    const float gradient = scale *
+        (grad_result[row] * (selected - probability) + grad_lse[row] * probability);
+    grad_logits[offset] = static_cast<scalar_t>(gradient);
+    }
 }
 
 template <int Bytes>
@@ -418,6 +630,155 @@ torch::Tensor hip_deterministic_logp_backward(
                     coef_logp.data_ptr<float>(), coef_lse.data_ptr<float>(),
                     target_local.data_ptr<int64_t>(), grad.data_ptr<scalar_t>(), rows,
                     local_vocab, vocab_start, real_vocab, has_lse_grad);
+        }));
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return grad;
+}
+
+std::vector<torch::Tensor> hip_sparse_nucleus_logp_forward(
+    torch::Tensor logits,
+    torch::Tensor ids,
+    torch::Tensor valid,
+    torch::Tensor targets,
+    torch::Tensor inverse_temperature) {
+    check_logits(logits);
+    auto input = logits.contiguous();
+    auto ids_c = ids.contiguous();
+    auto valid_c = valid.contiguous();
+    auto targets_c = targets.contiguous();
+    auto inverse_c = inverse_temperature.contiguous();
+    const int64_t rows = input.size(0);
+    constexpr int Columns = 128;
+    const int64_t columns = input.size(1);
+    TORCH_CHECK(columns > 0, "sparse nucleus logits must have positive width");
+    TORCH_CHECK(ids_c.sizes() == input.sizes() && ids_c.scalar_type() == at::ScalarType::Long,
+                "sparse nucleus ids must be int64 and match logits");
+    TORCH_CHECK(valid_c.sizes() == input.sizes() && valid_c.scalar_type() == at::ScalarType::Bool,
+                "sparse nucleus valid mask must be bool and match logits");
+    TORCH_CHECK(targets_c.dim() == 1 && targets_c.size(0) == rows &&
+                    targets_c.scalar_type() == at::ScalarType::Long,
+                "sparse nucleus targets must be int64 with one value per row");
+    TORCH_CHECK(inverse_c.dim() == 1 && inverse_c.size(0) == rows &&
+                    inverse_c.scalar_type() == at::ScalarType::Float,
+                "sparse nucleus inverse temperature must be float32 with one value per row");
+    TORCH_CHECK(ids_c.device() == input.device() && valid_c.device() == input.device() &&
+                    targets_c.device() == input.device() && inverse_c.device() == input.device(),
+                "all sparse nucleus inputs must share one ROCm device");
+    auto options = input.options().dtype(at::ScalarType::Float);
+    auto result = torch::empty({rows}, options);
+    auto lse = torch::empty({rows}, options);
+    auto entropy = torch::empty({rows}, options);
+    if (rows == 0) return {result, lse, entropy};
+    auto stream = at::cuda::getCurrentCUDAStream();
+    AT_DISPATCH_FLOATING_TYPES_AND2(
+        at::ScalarType::Half, at::ScalarType::BFloat16, input.scalar_type(),
+        "hip_sparse_nucleus_logp_forward", ([&] {
+            if (columns == Columns) {
+                hip_sparse_nucleus_forward_kernel<scalar_t, Columns><<<rows, 1, 0, stream>>>(
+                    input.data_ptr<scalar_t>(), ids_c.data_ptr<int64_t>(), valid_c.data_ptr<bool>(),
+                    targets_c.data_ptr<int64_t>(), inverse_c.data_ptr<float>(),
+                    result.data_ptr<float>(), lse.data_ptr<float>(), entropy.data_ptr<float>(), rows, columns);
+            } else {
+                hip_sparse_nucleus_forward_kernel<scalar_t><<<rows, 1, 0, stream>>>(
+                input.data_ptr<scalar_t>(), ids_c.data_ptr<int64_t>(), valid_c.data_ptr<bool>(),
+                targets_c.data_ptr<int64_t>(), inverse_c.data_ptr<float>(),
+                result.data_ptr<float>(), lse.data_ptr<float>(), entropy.data_ptr<float>(), rows, columns);
+            }
+        }));
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return {result, lse, entropy};
+}
+
+std::vector<torch::Tensor> hip_replicated_sparse_nucleus_logp(
+    torch::Tensor logits, torch::Tensor ids, torch::Tensor targets,
+    double inverse_temperature, bool transport_sum) {
+    check_logits(logits);
+    TORCH_CHECK(logits.is_contiguous(), "replicated logits must be contiguous");
+    TORCH_CHECK(ids.dim() == 2 && ids.size(0) == logits.size(0) &&
+                ids.size(1) > 0 && ids.size(1) <= 128 &&
+                ids.scalar_type() == at::ScalarType::Long && ids.is_contiguous(),
+                "replicated support must be contiguous int64 [rows, 1..128]");
+    TORCH_CHECK(targets.dim() == 1 && targets.size(0) == logits.size(0) &&
+                targets.scalar_type() == at::ScalarType::Long && targets.is_contiguous(),
+                "replicated targets must be contiguous int64 [rows]");
+    TORCH_CHECK(ids.device() == logits.device() && targets.device() == logits.device(),
+                "replicated sparse inputs must share one device");
+    TORCH_CHECK(inverse_temperature > 0 && std::isfinite(inverse_temperature),
+                "inverse temperature must be finite and positive");
+    auto options = logits.options().dtype(at::ScalarType::Float);
+    auto prepared = torch::empty({logits.size(0), 128}, logits.options());
+    auto sorted_ids = torch::empty({logits.size(0), 128}, ids.options());
+    auto valid = torch::empty({logits.size(0), 128}, logits.options().dtype(at::ScalarType::Bool));
+    auto inverse = torch::empty({logits.size(0)}, options);
+    auto present = torch::empty({logits.size(0)}, logits.options().dtype(at::ScalarType::Bool));
+    if (logits.size(0)) {
+        auto stream = at::cuda::getCurrentCUDAStream();
+        AT_DISPATCH_FLOATING_TYPES_AND2(
+            at::ScalarType::Half, at::ScalarType::BFloat16, logits.scalar_type(),
+            "hip_replicated_sparse_nucleus_logp", ([&] {
+                hip_replicated_sparse_prepare_kernel<scalar_t><<<logits.size(0), 128, 0, stream>>>(
+                    logits.data_ptr<scalar_t>(), ids.data_ptr<int64_t>(), targets.data_ptr<int64_t>(),
+                    prepared.data_ptr<scalar_t>(), sorted_ids.data_ptr<int64_t>(), valid.data_ptr<bool>(), inverse.data_ptr<float>(),
+                    present.data_ptr<bool>(), logits.size(1), ids.size(1), static_cast<float>(inverse_temperature), transport_sum);
+            }));
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+    }
+    auto result = hip_sparse_nucleus_logp_forward(prepared, sorted_ids, valid, targets, inverse);
+    result.push_back(present);
+    return result;
+}
+
+torch::Tensor hip_sparse_nucleus_logp_backward(
+    torch::Tensor logits,
+    torch::Tensor ids,
+    torch::Tensor valid,
+    torch::Tensor targets,
+    torch::Tensor inverse_temperature,
+    torch::Tensor lse,
+    torch::Tensor grad_result,
+    torch::Tensor grad_lse) {
+    check_logits(logits);
+    auto input = logits.contiguous();
+    auto ids_c = ids.contiguous();
+    auto valid_c = valid.contiguous();
+    auto targets_c = targets.contiguous();
+    auto inverse_c = inverse_temperature.contiguous();
+    auto lse_c = lse.contiguous();
+    auto grad_result_c = grad_result.contiguous();
+    auto grad_lse_c = grad_lse.contiguous();
+    const int64_t rows = input.size(0);
+    constexpr int Columns = 128;
+    const int64_t columns = input.size(1);
+    TORCH_CHECK(columns > 0, "sparse nucleus logits must have positive width");
+    auto check_fp32_rows = [&](const torch::Tensor& value, const char* name) {
+        TORCH_CHECK(value.is_cuda() && value.device() == input.device() &&
+                        value.scalar_type() == at::ScalarType::Float && value.dim() == 1 &&
+                        value.size(0) == rows,
+                    name, " must be a device float32 vector with one value per row");
+    };
+    check_fp32_rows(inverse_c, "inverse_temperature");
+    check_fp32_rows(lse_c, "lse");
+    check_fp32_rows(grad_result_c, "grad_result");
+    check_fp32_rows(grad_lse_c, "grad_lse");
+    auto grad = torch::empty_like(input);
+    if (rows == 0) return grad;
+    auto stream = at::cuda::getCurrentCUDAStream();
+    AT_DISPATCH_FLOATING_TYPES_AND2(
+        at::ScalarType::Half, at::ScalarType::BFloat16, input.scalar_type(),
+        "hip_sparse_nucleus_logp_backward", ([&] {
+            if (columns == Columns) {
+                hip_sparse_nucleus_backward_kernel<scalar_t, Columns, true><<<rows, Columns, 0, stream>>>(
+                    input.data_ptr<scalar_t>(), ids_c.data_ptr<int64_t>(), valid_c.data_ptr<bool>(),
+                    targets_c.data_ptr<int64_t>(), inverse_c.data_ptr<float>(), lse_c.data_ptr<float>(),
+                    grad_result_c.data_ptr<float>(), grad_lse_c.data_ptr<float>(),
+                    grad.data_ptr<scalar_t>(), rows, columns);
+            } else {
+                hip_sparse_nucleus_backward_kernel<scalar_t, Columns><<<rows, Columns, 0, stream>>>(
+                    input.data_ptr<scalar_t>(), ids_c.data_ptr<int64_t>(), valid_c.data_ptr<bool>(),
+                    targets_c.data_ptr<int64_t>(), inverse_c.data_ptr<float>(), lse_c.data_ptr<float>(),
+                    grad_result_c.data_ptr<float>(), grad_lse_c.data_ptr<float>(),
+                    grad.data_ptr<scalar_t>(), rows, columns);
+            }
         }));
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return grad;

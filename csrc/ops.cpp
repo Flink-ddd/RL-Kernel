@@ -130,6 +130,24 @@ torch::Tensor hip_deterministic_logp_backward(
     int64_t vocab_start,
     int64_t real_vocab,
     bool has_lse_grad);
+std::vector<torch::Tensor> hip_sparse_nucleus_logp_forward(
+    torch::Tensor logits,
+    torch::Tensor ids,
+    torch::Tensor valid,
+    torch::Tensor targets,
+    torch::Tensor inverse_temperature);
+std::vector<torch::Tensor> hip_replicated_sparse_nucleus_logp(
+    torch::Tensor logits, torch::Tensor ids, torch::Tensor targets,
+    double inverse_temperature, bool transport_sum);
+torch::Tensor hip_sparse_nucleus_logp_backward(
+    torch::Tensor logits,
+    torch::Tensor ids,
+    torch::Tensor valid,
+    torch::Tensor targets,
+    torch::Tensor inverse_temperature,
+    torch::Tensor lse,
+    torch::Tensor grad_result,
+    torch::Tensor grad_lse);
 #endif
 
 #if !defined(USE_ROCM) && !defined(KERNEL_ALIGN_WITH_ROCM)
@@ -555,6 +573,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "ROCm-tuned vocab-tile FP32 max and sumexp partials read from the stored shard");
     m.def("hip_deterministic_logp_backward", &hip_deterministic_logp_backward,
           "ROCm fused vocab-parallel selected-logprob/LSE backward on the local shard");
+    m.def("hip_sparse_nucleus_logp_forward", &hip_sparse_nucleus_logp_forward,
+          "ROCm fixed-binary 128-candidate sparse nucleus logprob forward");
+    m.def("hip_replicated_sparse_nucleus_logp", &hip_replicated_sparse_nucleus_logp,
+          "ROCm sparse rollout scoring from already replicated raw logits");
+    m.def("hip_sparse_nucleus_logp_backward", &hip_sparse_nucleus_logp_backward,
+          "ROCm fixed-binary 128-candidate sparse nucleus logprob backward");
 #endif
 
 #if !defined(USE_ROCM) && !defined(KERNEL_ALIGN_WITH_ROCM)

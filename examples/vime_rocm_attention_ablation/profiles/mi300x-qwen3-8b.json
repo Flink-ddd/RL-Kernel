@@ -8,7 +8,6 @@
   },
   "paths": {
     "workspace": "/workspace/rocm-unified-20260919",
-    "rl_kernel_root": "/workspace/rocm-unified-20260919/rl-kernel",
     "vime_root": "/workspace/rocm-unified-20260919/vime",
     "megatron_root": "/workspace/rocm-unified-20260919/megatron",
     "vllm_root": "/workspace/rocm-unified-20260919/vllm",
@@ -33,6 +32,6 @@
     "max-tokens-per-gpu": 4096,
     "ray-port": 8090,
     "ray-dashboard-port": 48025,
-    "vllm-gpu-memory-utilization": 0.38
+    "vllm-gpu-memory-utilization": 0.4
   }
 }

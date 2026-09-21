@@ -24,6 +24,76 @@ _ALIGNMENT_DIAGNOSTIC_LOCK = threading.Lock()
 _ALIGNMENT_DIAGNOSTIC_CALLS = 0
 
 
+class _SparseTpSum(torch.autograd.Function):
+    """Sum disjoint vocabulary-owner values without duplicating gradients.
+
+    Every sparse nucleus ID belongs to exactly one TP rank, so the forward
+    collective combines one non-zero value with zeros.  The replicated loss
+    is evaluated on every TP rank; its backward therefore passes the local
+    gradient through without a second cross-rank sum.
+    """
+
+    @staticmethod
+    def forward(ctx: Any, values: torch.Tensor, group: Any) -> torch.Tensor:
+        ctx.group = group
+        result = values.clone()
+        if group is not None and torch.distributed.get_world_size(group=group) > 1:
+            torch.distributed.all_reduce(result, group=group)
+        return result
+
+    @staticmethod
+    def backward(ctx: Any, grad_output: torch.Tensor) -> tuple[torch.Tensor, None]:
+        return grad_output, None
+
+
+class _HipSparseNucleusLogp(torch.autograd.Function):
+    """Use one pre-built HIP code object in rollout and training processes."""
+
+    @staticmethod
+    def forward(
+        ctx: Any,
+        logits: torch.Tensor,
+        ids: torch.Tensor,
+        valid: torch.Tensor,
+        targets: torch.Tensor,
+        inverse_temperature: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        from rl_engine.kernels.ops.base import _C
+
+        result, lse, entropy = _C.hip_sparse_nucleus_logp_forward(
+            logits, ids, valid, targets, inverse_temperature
+        )
+        ctx.save_for_backward(logits, ids, valid, targets, inverse_temperature, lse)
+        ctx.mark_non_differentiable(entropy)
+        return result, lse, entropy
+
+    @staticmethod
+    def backward(
+        ctx: Any,
+        grad_result: torch.Tensor | None,
+        grad_lse: torch.Tensor | None,
+        grad_entropy: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, None, None, None, None]:
+        from rl_engine.kernels.ops.base import _C
+
+        logits, ids, valid, targets, inverse_temperature, lse = ctx.saved_tensors
+        if grad_result is None:
+            grad_result = torch.zeros_like(lse)
+        if grad_lse is None:
+            grad_lse = torch.zeros_like(lse)
+        grad_logits = _C.hip_sparse_nucleus_logp_backward(
+            logits,
+            ids,
+            valid,
+            targets,
+            inverse_temperature,
+            lse,
+            grad_result.float().contiguous(),
+            grad_lse.float().contiguous(),
+        )
+        return grad_logits, None, None, None, None
+
+
 def _alignment_diagnostics_enabled() -> bool:
     return os.getenv("RL_KERNEL_ALIGNMENT_DIAGNOSTICS", "").strip().lower() in {
         "1",
@@ -352,6 +422,200 @@ class LinearLogpWrapper:
                 raise ValueError(
                     f"linear_logp target_ids must be in [0, {real_vocab_size}), got invalid ids"
                 )
+
+    def _canonical_sparse_nucleus_logp(
+        self,
+        gathered_logits: torch.Tensor,
+        nucleus_ids: torch.Tensor,
+        valid: torch.Tensor,
+        target_ids: torch.Tensor,
+        inverse_temperature: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Score a compact nucleus without launching one kernel per candidate."""
+
+        columns = int(gathered_logits.size(1))
+        # Keep the candidate axis fixed while leaving the independent row axis
+        # dynamic.  Transcendentals below use explicit arithmetic polynomials,
+        # avoiding the ROCm exp/log intrinsics whose low bits vary with the
+        # calling execution context (vLLM graph versus Megatron eager).
+        canonical_columns = int(os.getenv("RL_KERNEL_SPARSE_LOGP_CANONICAL_COLUMNS", "128"))
+        if canonical_columns <= 0:
+            raise ValueError("sparse logp canonical column count must be positive")
+        if torch.version.hip is not None:
+            canonical_columns = max(canonical_columns, columns)
+        elif columns > canonical_columns:
+            raise RuntimeError("CUDA sparse geometry exceeds configured columns")
+
+        selected_present = torch.any(valid & (nucleus_ids == target_ids.reshape(-1, 1)), dim=1)
+        torch._assert_async(
+            torch.all(selected_present),
+            "strict sparse top-p nucleus does not contain every target token",
+        )
+
+        if columns < canonical_columns:
+            column_padding = canonical_columns - columns
+            gathered_logits = torch.nn.functional.pad(
+                gathered_logits, (0, column_padding), value=0.0
+            )
+            nucleus_ids = torch.nn.functional.pad(nucleus_ids, (0, column_padding), value=0)
+            valid = torch.nn.functional.pad(valid, (0, column_padding), value=False)
+        # ROCm must use the extension's already-compiled code object. A Triton
+        # function may still specialize differently in independent processes.
+        if torch.version.hip is None:
+            raise RuntimeError("sparse nucleus HIP scorer requires ROCm")
+        sparse_op = _HipSparseNucleusLogp
+        return sparse_op.apply(
+            gathered_logits,
+            nucleus_ids,
+            valid,
+            target_ids,
+            inverse_temperature,
+        )
+
+    def from_local_logits_sparse_nucleus(
+        self,
+        local_logits: torch.Tensor,
+        target_ids: torch.Tensor,
+        nucleus_ids: torch.Tensor,
+        *,
+        tp_group: Any,
+        vocab_start_index: int,
+        global_vocab_size: int,
+        real_vocab_size: int,
+        temperature: float | torch.Tensor | None,
+        target: str,
+        return_entropy: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Score only retained top-p IDs while preserving the strict contract."""
+
+        if local_logits.ndim != 2 or nucleus_ids.ndim != 2:
+            raise ValueError("sparse top-p replay expects [T,V_local] logits and [T,K] IDs")
+        if nucleus_ids.size(0) != local_logits.size(0):
+            raise ValueError("sparse top-p nucleus rows must match local logits")
+        if nucleus_ids.device != local_logits.device:
+            raise ValueError("sparse top-p nucleus IDs must share the logits device")
+        rank, world = self._tp_coordinates(tp_group)
+        local_vocab = int(local_logits.size(1))
+        if int(global_vocab_size) != local_vocab * world:
+            raise ValueError("sparse top-p replay requires complete equal TP vocabulary shards")
+        if int(vocab_start_index) != rank * local_vocab:
+            raise ValueError("sparse top-p replay received a non-canonical vocabulary offset")
+        self._validate_targets(
+            target_ids, rows=local_logits.size(0), real_vocab_size=int(real_vocab_size)
+        )
+
+        ids = nucleus_ids.to(dtype=torch.long)
+        valid = (ids >= 0) & (ids < int(real_vocab_size))
+        sentinel = torch.full_like(ids, int(global_vocab_size))
+        ids, _ = torch.sort(torch.where(valid, ids, sentinel), dim=1)
+        valid = ids < int(real_vocab_size)
+        if ids.size(1) > 1:
+            valid[:, 1:] &= ids[:, 1:] != ids[:, :-1]
+
+        local_ids = ids - int(vocab_start_index)
+        owned = valid & (local_ids >= 0) & (local_ids < local_vocab)
+        safe_local_ids = local_ids.clamp(0, max(local_vocab - 1, 0))
+        gathered_local = local_logits.gather(1, safe_local_ids)
+        gathered_local = torch.where(owned, gathered_local, torch.zeros_like(gathered_local))
+        gathered = _SparseTpSum.apply(gathered_local, tp_group)
+        temperature_tensor = self._temperature_tensor(
+            temperature, rows=local_logits.size(0), device=local_logits.device
+        )
+        if temperature_tensor is None:
+            temperature_tensor = torch.ones(
+                (local_logits.size(0),), dtype=torch.float32, device=local_logits.device
+            )
+        if not isinstance(temperature, torch.Tensor):
+            scalar = 1.0 if temperature is None else float(temperature)
+            inverse_temperature = torch.full(
+                (local_logits.size(0),),
+                1.0 / scalar,
+                dtype=torch.float32,
+                device=local_logits.device,
+            )
+        else:
+            # Tensor temperatures are uncommon in rollout, but keep this path
+            # free of the device reciprocal intrinsic as well.  A bit-level
+            # seed plus four Newton steps uses only deterministic FP32 basic
+            # arithmetic.
+            value = temperature_tensor.detach().contiguous()
+            guess_bits = 0x7EF311C3 - value.view(torch.int32)
+            inverse_temperature = guess_bits.view(torch.float32)
+            for _ in range(4):
+                inverse_temperature = inverse_temperature * (2.0 - value * inverse_temperature)
+        result, _lse, entropy = self._canonical_sparse_nucleus_logp(
+            gathered, ids, valid, target_ids.to(torch.long), inverse_temperature
+        )
+        self._last_provenance = {
+            **self._mismatch_provenance(),
+            "target": target,
+            "runtime_platform": "rocm" if torch.version.hip is not None else "cuda",
+            "actual_backend": self.backend_id,
+            "logprob_kernel_backend": "rlkernel.sparse_nucleus.hip_serial_deterministic.v12",
+            "deterministic_linear_logp": True,
+            "strict_entrypoint": "sparse_nucleus_logp_from_local_logits_tp",
+            "local_logits_shape": list(local_logits.shape),
+            "nucleus_shape": list(nucleus_ids.shape),
+            "target_shape": list(target_ids.shape),
+            "tp_group_present": tp_group is not None,
+            "vocab_start_index": int(vocab_start_index),
+            "global_vocab_size": int(global_vocab_size),
+            "real_vocab_size": int(real_vocab_size),
+            "temperature": None if temperature is None else "provided",
+            "contract_version": "sparse-nucleus-hip-serial-deterministic-v12",
+            "logits_materialized": True,
+            "lm_head_result_reused": True,
+            "sparse_metric_entropy_fused": bool(return_entropy),
+        }
+        if return_entropy:
+            return result, entropy
+        return result
+
+    def from_replicated_logits_sparse_nucleus(
+        self, logits: torch.Tensor, target_ids: torch.Tensor,
+        nucleus_ids: torch.Tensor, *, real_vocab_size: int,
+        temperature: float, return_entropy: bool = False, tp_group: Any = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Inference-only reuse of the vocabulary already gathered by vLLM."""
+        if torch.is_grad_enabled() or torch.version.hip is None:
+            raise RuntimeError("replicated sparse scoring requires ROCm inference")
+        if logits.ndim != 2 or logits.size(1) != real_vocab_size:
+            raise ValueError("replicated sparse scoring requires the complete real vocabulary")
+        if nucleus_ids.ndim != 2 or nucleus_ids.size(0) != logits.size(0):
+            raise ValueError("replicated support rows must match logits")
+        _, source_world = self._tp_coordinates(tp_group)
+        transport_sum = source_world > 1
+        if not 0 < nucleus_ids.size(1) <= 128:
+            # Wider support remains exact and unrestricted; no truncation.
+            return self.from_local_logits_sparse_nucleus(
+                logits + 0.0 if transport_sum else logits, target_ids, nucleus_ids, tp_group=None,
+                vocab_start_index=0, global_vocab_size=real_vocab_size,
+                real_vocab_size=real_vocab_size, temperature=temperature,
+                target="rollout", return_entropy=return_entropy,
+            )
+        from rl_engine.kernels.ops.base import _C
+
+        if temperature <= 0:
+            raise ValueError("temperature must be positive")
+        result, _lse, entropy, present = _C.hip_replicated_sparse_nucleus_logp(
+            logits, nucleus_ids.to(torch.long).contiguous(),
+            target_ids.to(torch.long).contiguous(), 1.0 / float(temperature), transport_sum,
+        )
+        torch._assert_async(present.all(), "strict sparse nucleus is missing a target token")
+        self._last_provenance = {
+            **self._mismatch_provenance(),
+            "target": "rollout", "runtime_platform": "rocm",
+            "actual_backend": self.backend_id, "deterministic_linear_logp": True,
+            "strict_entrypoint": "sparse_nucleus_logp_from_replicated_logits",
+            "logprob_kernel_backend": "rlkernel.sparse_nucleus.hip_serial_deterministic.v12",
+            "contract_version": "sparse-nucleus-hip-serial-deterministic-v12",
+            "preparation_backend": "rlkernel.sparse_nucleus.hip_replicated.v1",
+            "logits_materialized": True, "lm_head_result_reused": True,
+            "replicated_logits_reused": True, "additional_tp_collective": False,
+            "nucleus_shape": list(nucleus_ids.shape),
+            "real_vocab_size": real_vocab_size, "temperature": "provided",
+        }
+        return (result, entropy) if return_entropy else result
 
     @classmethod
     def _validate_contract(

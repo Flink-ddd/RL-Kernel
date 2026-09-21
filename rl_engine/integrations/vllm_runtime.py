@@ -1091,6 +1091,7 @@ def _patch_qwen3_strict_model(
         register_rocm_linear_staging = register_det_gemm_all_reduce_staging
 
     attention_init = attention_cls.__init__
+    attention_forward = getattr(attention_cls, "forward", None)
     unquantized_apply = linear_method_cls.apply
     original_rms_forward_native = rms_norm_cls.forward_native
 
@@ -1434,6 +1435,38 @@ def _patch_qwen3_strict_model(
     if hasattr(attention_cls, _STRICT_MODEL_PATCH_MARKER):
         return
 
+    def strict_attention_forward(instance, positions, hidden_states):
+        from rl_engine.kernels.ops.rocm.qk_norm_rope import strict_qk_norm_rope
+
+        rotary = instance.rotary_emb
+        cosine = getattr(rotary, "_rl_kernel_rope_cos_fp32", None)
+        sine = getattr(rotary, "_rl_kernel_rope_sin_fp32", None)
+        if (
+            instance.head_dim != 128
+            or cosine is None
+            or sine is None
+            or instance.q_norm.variance_size_override is not None
+            or instance.k_norm.variance_size_override is not None
+            or not instance.q_norm.has_weight
+            or not instance.k_norm.has_weight
+        ):
+            return attention_forward(instance, positions, hidden_states)
+        qkv, _ = instance.qkv_proj(hidden_states)
+        q, k, v = qkv.split([instance.q_size, instance.kv_size, instance.kv_size], dim=-1)
+        query, key = strict_qk_norm_rope(
+            q.view(-1, instance.num_heads, instance.head_dim),
+            k.view(-1, instance.num_kv_heads, instance.head_dim),
+            instance.q_norm.weight,
+            instance.k_norm.weight,
+            positions,
+            cosine,
+            sine,
+            instance.q_norm.variance_epsilon,
+            instance.k_norm.variance_epsilon,
+        )
+        output, _ = instance.o_proj(instance.attn(query.reshape(q.shape), key.reshape(k.shape), v))
+        return output
+
     def attention_init_wrapped(instance: Any, *args: Any, **kwargs: Any) -> None:
         require_rocm_graph_runtime()
         attention_init(instance, *args, **kwargs)
@@ -1447,6 +1480,40 @@ def _patch_qwen3_strict_model(
     setattr(attention_cls, _STRICT_MODEL_PATCH_MARKER, attention_init)
     linear_method_cls.apply = deterministic_linear_apply
     attention_cls.__init__ = attention_init_wrapped
+    if torch.version.hip is not None and production_classes:
+        attention_cls.forward = strict_attention_forward
+
+
+def _patch_rocm_top_p_scan(integration: VllmIntegration) -> None:
+    # The exact scan mirrors the validated ATen version's reduction tree.
+    if not torch.__version__.split("+")[0].startswith("2.12."):
+        return
+    from vllm.v1.sample.ops import topk_topp_sampler
+
+    from rl_engine.kernels.ops.triton.top_p_scan import apply_top_k_top_p
+
+    original = topk_topp_sampler.apply_top_k_top_p_pytorch
+    if hasattr(original, _PATCH_MARKER):
+        return
+
+    def wrapped(logits, k, p, allow_cpu_sync=False):
+        # Single-row CUB and large-batch vLLM Triton scans have different
+        # arithmetic contracts. Keep those native routes intact.
+        if (
+            p is None or not logits.is_cuda or logits.dtype != torch.float32
+            or not 2 <= logits.size(0) < 8 or logits.size(1) < 4096
+            or not str(torch.cuda.get_device_properties(logits.device).gcnArchName).startswith(
+                "gfx942"
+            )
+        ):
+            return original(logits, k, p, allow_cpu_sync=allow_cpu_sync)
+        return apply_top_k_top_p(logits, k, p)
+
+    setattr(wrapped, _PATCH_MARKER, original)
+    topk_topp_sampler.apply_top_k_top_p_pytorch = wrapped
+    integration.record_installed_hook(
+        "logp", "vllm.v1.sample.ops.topk_topp_sampler.apply_top_k_top_p_pytorch"
+    )
 
 
 def _patch_sampler(integration: VllmIntegration, *, strict_linear_logp: bool) -> None:
@@ -1522,7 +1589,15 @@ def _patch_tokens_api_top_logprobs() -> None:
     """Preserve token IDs on tokens-only API top-logprob entries."""
 
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionLogProb
-    from vllm.entrypoints.serve.disagg.serving import ServingTokens
+    try:
+        from vllm.entrypoints.serve.disagg.serving import ServingTokens
+    except ModuleNotFoundError as exc:
+        if not exc.name or not "vllm.entrypoints.serve.disagg".startswith(exc.name):
+            raise
+        # The pinned vLLM 0.26 token-in/token-out endpoint already emits
+        # token_id:<id> entries. Keep its historical native serializer;
+        # rebuilding every returned entry here duplicates CPU work.
+        return
 
     if hasattr(ServingTokens, _STRICT_TOKENS_LOGPROBS_PATCH_MARKER):
         return
@@ -1769,6 +1844,8 @@ def install_vllm_integration(plan: IntegrationPlan) -> VllmIntegration:
         _patch_rocm_weight_cache_refresh()
     _patch_qwen3_layer_alignment_diagnostics()
     if strict_linear_logp:
+        if torch.version.hip is not None:
+            _patch_rocm_top_p_scan(integration)
         _patch_tokens_api_top_logprobs()
         _patch_qwen_lm_head_padding()
         _patch_strict_lm_head_linear()

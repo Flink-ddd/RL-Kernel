@@ -19,7 +19,16 @@ Use all three patched companion checkouts with this RL-Kernel branch. Configure
 their paths in `../profiles/mi300x-qwen3-8b.json` before running `rlk-repro`.
 ROCm libraries, compiled extensions, model weights and datasets are not bundled.
 
-Validation: 8 MI300X/gfx942 GPUs, PyTorch 2.12.0+rocm7.14.0a20260608, HIP
+The current VIME patch packs complete retained top-p supports into compact
+token-ID rows and selects `processed_logits` for the strict sparse route.
+RL-Kernel supplies the HIP scorer and fused monitoring entropy; rebuild its
+extension after updating. The vLLM patch still transports complete support,
+including nuclei larger than 64 or 128 tokens. Use the
+[ROCm performance command](../../../docs/usage/rocm-sparse-performance.md)
+with rollout-logprob reuse disabled. The historical 4.44% throughput difference
+is not a measurement of this updated command.
+
+Previous companion validation: 8 MI300X/gfx942 GPUs, PyTorch 2.12.0+rocm7.14.0a20260608, HIP
 7.14.60850. Nine complete one-round cases passed, each with eight samples and
 maximum response length 7168, with rollout-logprob reuse disabled and reference
 KL coefficient 0.001. In total 292,249 selected train/rollout logprobs matched

@@ -299,6 +299,8 @@ def _provider_impl(request: Any, *, linear_logp: Any = None) -> LinearLogpResult
         # output projection.
         request_logits = getattr(request, "logits", None)
         keep_mask = getattr(request, "log_prob_keep_mask", None)
+        sparse_nucleus_ids = _metadata(request).get("top_p_sparse_token_ids")
+        sparse_metric_entropy = None
         materialized_local_logits = (
             isinstance(request_logits, torch.Tensor)
             and request_logits.ndim == 2
@@ -326,6 +328,7 @@ def _provider_impl(request: Any, *, linear_logp: Any = None) -> LinearLogpResult
             and not with_entropy_grad
             and _is_identity_temperature(local_logits_temperature)
             and keep_mask is None
+            and sparse_nucleus_ids is None
         )
         strict_lse = None
         if reuse_local_logits:
@@ -343,19 +346,35 @@ def _provider_impl(request: Any, *, linear_logp: Any = None) -> LinearLogpResult
                 raise RuntimeError(
                     "strict reusable LM-head logits require a from_local_logits provider"
                 )
-            scored = from_local_logits(
-                local_logits,
-                request.target_ids,
-                tp_group=getattr(request, "tensor_parallel_group", None),
-                vocab_start_index=int(partition.local_start),
-                global_vocab_size=int(partition.padded_size),
-                real_vocab_size=int(partition.real_size),
-                target="training",
-                temperature=local_logits_temperature,
-                return_lse=fast_metric_entropy,
-                diagnostics_hidden=hidden,
-                diagnostics_lm_head_weight=projection.weight,
-            )
+            if sparse_nucleus_ids is not None:
+                scored = linear_logp.from_local_logits_sparse_nucleus(
+                    local_logits,
+                    request.target_ids,
+                    sparse_nucleus_ids,
+                    tp_group=getattr(request, "tensor_parallel_group", None),
+                    vocab_start_index=int(partition.local_start),
+                    global_vocab_size=int(partition.padded_size),
+                    real_vocab_size=int(partition.real_size),
+                    target="training",
+                    temperature=local_logits_temperature,
+                    return_entropy=with_entropy and not with_entropy_grad,
+                )
+                if with_entropy and not with_entropy_grad:
+                    scored, sparse_metric_entropy = scored
+            else:
+                scored = from_local_logits(
+                    local_logits,
+                    request.target_ids,
+                    tp_group=getattr(request, "tensor_parallel_group", None),
+                    vocab_start_index=int(partition.local_start),
+                    global_vocab_size=int(partition.padded_size),
+                    real_vocab_size=int(partition.real_size),
+                    target="training",
+                    temperature=local_logits_temperature,
+                    return_lse=fast_metric_entropy,
+                    diagnostics_hidden=hidden,
+                    diagnostics_lm_head_weight=projection.weight,
+                )
             if fast_metric_entropy:
                 logp, strict_lse = scored
             else:
@@ -388,6 +407,13 @@ def _provider_impl(request: Any, *, linear_logp: Any = None) -> LinearLogpResult
                 "backend_id": "rlkernel.strict-lse-metric-entropy.v1",
                 "logits_materialized": True,
                 "strict_lse_reused": True,
+                "with_entropy_grad": False,
+            }
+        elif sparse_metric_entropy is not None:
+            entropy = sparse_metric_entropy
+            entropy_provenance = {
+                "backend_id": "rlkernel.sparse-nucleus-metric-entropy.v1",
+                "sparse_nucleus_reused": True,
                 "with_entropy_grad": False,
             }
         elif with_entropy:
@@ -427,7 +453,7 @@ def _provider_impl(request: Any, *, linear_logp: Any = None) -> LinearLogpResult
         provenance["execution"] = {
             "role": "vime_training_linear_logp",
             "strict_backend": True,
-            "top_p_replay": keep_mask is not None,
+            "top_p_replay": keep_mask is not None or sparse_nucleus_ids is not None,
             "cp_is_merge_axis": False,
             "logits_materialized": bool(
                 reuse_local_logits or getattr(request, "with_entropy", False)

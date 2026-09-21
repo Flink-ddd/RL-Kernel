@@ -53,6 +53,7 @@ FORWARDED_STRICT_ENVIRONMENT = (
     "RL_KERNEL_ROCM_FIXED_PAGED_TILE",
     "RL_KERNEL_ROCM_PAGED_KV_MAX_TOKENS",
     "RL_KERNEL_ROCM_ATTENTION_BACKEND",
+    "RL_KERNEL_SPARSE_TOP_P_REPLAY",
 )
 
 
@@ -61,6 +62,7 @@ class WorkloadConfig(MatrixConfig):
 
     def frozen_parameters(self):
         value = super().frozen_parameters()
+        value["grpo_std_normalization"] = getattr(self, "grpo_std_normalization", "enabled")
         value["ffn_case"] = self.case_id
         value["logp_case"] = self.case_id
         value["framework_consistency"] = {
@@ -142,6 +144,9 @@ def parse_args(argv=None):
     parser.add_argument("--rollout-temperature", type=float, default=1.0)
     parser.add_argument("--rollout-top-p", type=float, default=1.0)
     parser.add_argument("--rollout-top-k", type=int, default=-1)
+    parser.add_argument(
+        "--grpo-std-normalization", choices=("enabled", "disabled"), default="enabled"
+    )
     parser.add_argument("--lr", type=float, default=1e-6)
     parser.add_argument("--weight-decay", type=float, default=0.1)
     parser.add_argument("--kl-coef", type=float, default=0.0)
@@ -194,6 +199,7 @@ def main(argv=None) -> int:
         ray_dashboard_port=args.ray_dashboard_port,
     )
     config.case_id = case_id
+    config.grpo_std_normalization = args.grpo_std_normalization
     config.validate(require_paths=True)
     _prepare_run_dir(args.run_dir)
     frozen_before = sealed_manifest(config)
@@ -215,6 +221,11 @@ def main(argv=None) -> int:
     environment.update(
         {
             "RLK_ABLATION_USE_ROLLOUT_LOGPROBS": "0",
+            "RLK_ABLATION_DISABLE_GRPO_STD_NORMALIZATION": (
+                "1" if args.grpo_std_normalization == "disabled" else "0"
+            ),
+            "RL_KERNEL_ROCM_ATTENTION_BACKEND": "triton",
+            "RL_KERNEL_SPARSE_TOP_P_REPLAY": "1" if case_id == "R/R" else "0",
             "RL_KERNEL_ATTENTION_CASE": case_id,
             "RL_KERNEL_FFN_CASE": case_id,
             "RL_KERNEL_LOGP_CASE": case_id,

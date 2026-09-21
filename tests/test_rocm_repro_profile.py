@@ -56,6 +56,12 @@ def test_machine_profile_and_short_options_override_defaults(tmp_path, monkeypat
                 "0.8",
                 "--temperature",
                 "1.3",
+                "--lr",
+                "3e-7",
+                "--kl-coef",
+                "0.02",
+                "--grpo-std-normalization",
+                "disabled",
             ]
         )
         == 0
@@ -70,8 +76,12 @@ def test_machine_profile_and_short_options_override_defaults(tmp_path, monkeypat
         "rollout-temperature": "1.3",
         "mode": "consistency",
         "rollouts": "1",
+        "lr": "3e-07",
+        "kl-coef": "0.02",
+        "grpo-std-normalization": "disabled",
     }.items():
         assert command[command.index(f"--{option}") + 1] == expected
+    assert "--use-rollout-logprobs" not in command
 
 
 @pytest.mark.parametrize(

@@ -447,56 +447,24 @@ __global__ void ipc_reserve_sequence_kernel(
     PeerSignals signals,
     int64_t rank,
     int64_t world_size) {
-  if (blockIdx.x != 0 || threadIdx.x != 0) {
-    return;
+  // One lane polls each peer. The next generation cannot reuse staging until
+  // every rank has finished reading the previous generation.
+  __shared__ uint64_t previous;
+  if (threadIdx.x == 0) {
+    previous = __hip_atomic_load(
+        signals.sequence[rank], __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_SYSTEM);
   }
-  uint64_t sequence = 0;
-  if (rank == 0) {
-    const uint64_t previous = __hip_atomic_load(
-        signals.sequence[0],
-        __ATOMIC_ACQUIRE,
-        __HIP_MEMORY_SCOPE_SYSTEM);
-    for (int peer = 0; peer < world_size; ++peer) {
-      while (__hip_atomic_load(
-                 signals.done[peer],
-                 __ATOMIC_ACQUIRE,
-                 __HIP_MEMORY_SCOPE_SYSTEM) < previous) {
-        __builtin_amdgcn_s_sleep(1);
-      }
+  __syncthreads();
+  if (threadIdx.x < world_size) {
+    while (__hip_atomic_load(signals.done[threadIdx.x], __ATOMIC_ACQUIRE,
+                            __HIP_MEMORY_SCOPE_SYSTEM) < previous) {
+      __builtin_amdgcn_s_sleep(1);
     }
-    sequence = previous + 1;
-    __hip_atomic_store(
-        signals.sequence[0],
-        sequence,
-        __ATOMIC_RELEASE,
-        __HIP_MEMORY_SCOPE_SYSTEM);
-  } else {
-    const uint64_t previous = __hip_atomic_load(
-        signals.sequence[rank],
-        __ATOMIC_ACQUIRE,
-        __HIP_MEMORY_SCOPE_SYSTEM);
-    do {
-      sequence = __hip_atomic_load(
-          signals.sequence[0],
-          __ATOMIC_ACQUIRE,
-          __HIP_MEMORY_SCOPE_SYSTEM);
-      if (sequence <= previous) {
-        __builtin_amdgcn_s_sleep(1);
-      }
-    } while (sequence <= previous);
-    for (int peer = 0; peer < world_size; ++peer) {
-      while (__hip_atomic_load(
-                 signals.done[peer],
-                 __ATOMIC_ACQUIRE,
-                 __HIP_MEMORY_SCOPE_SYSTEM) < sequence - 1) {
-        __builtin_amdgcn_s_sleep(1);
-      }
-    }
-    __hip_atomic_store(
-        signals.sequence[rank],
-        sequence,
-        __ATOMIC_RELEASE,
-        __HIP_MEMORY_SCOPE_SYSTEM);
+  }
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    __hip_atomic_store(signals.sequence[rank], previous + 1,
+                       __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_SYSTEM);
   }
 }
 
@@ -504,26 +472,22 @@ __global__ void ipc_mark_ready_and_wait_dynamic_kernel(
     PeerSignals signals,
     int64_t rank,
     int64_t world_size) {
-  if (blockIdx.x != 0 || threadIdx.x != 0) {
-    return;
+  // Publish the local payload, then wait for all peers in parallel.
+  __shared__ uint64_t sequence;
+  if (threadIdx.x == 0) {
+    sequence = __hip_atomic_load(signals.sequence[rank], __ATOMIC_ACQUIRE,
+                                __HIP_MEMORY_SCOPE_SYSTEM);
+    __hip_atomic_store(signals.ready[rank], sequence, __ATOMIC_RELEASE,
+                       __HIP_MEMORY_SCOPE_SYSTEM);
   }
-  const uint64_t sequence = __hip_atomic_load(
-      signals.sequence[rank],
-      __ATOMIC_ACQUIRE,
-      __HIP_MEMORY_SCOPE_SYSTEM);
-  __hip_atomic_store(
-      signals.ready[rank],
-      sequence,
-      __ATOMIC_RELEASE,
-      __HIP_MEMORY_SCOPE_SYSTEM);
-  for (int peer = 0; peer < world_size; ++peer) {
-    while (__hip_atomic_load(
-               signals.ready[peer],
-               __ATOMIC_ACQUIRE,
-               __HIP_MEMORY_SCOPE_SYSTEM) != sequence) {
+  __syncthreads();
+  if (threadIdx.x < world_size) {
+    while (__hip_atomic_load(signals.ready[threadIdx.x], __ATOMIC_ACQUIRE,
+                            __HIP_MEMORY_SCOPE_SYSTEM) != sequence) {
       __builtin_amdgcn_s_sleep(1);
     }
   }
+  __syncthreads();
 }
 
 __global__ void ipc_mark_done_dynamic_kernel(PeerSignals signals, int64_t rank) {
@@ -741,7 +705,7 @@ void launch_reserve_sequence(
   hipLaunchKernelGGL(
       ipc_reserve_sequence_kernel,
       dim3(1),
-      dim3(1),
+      dim3(64),
       0,
       stream,
       signals,
@@ -758,7 +722,7 @@ void launch_mark_ready_and_wait_dynamic(
   hipLaunchKernelGGL(
       ipc_mark_ready_and_wait_dynamic_kernel,
       dim3(1),
-      dim3(1),
+      dim3(64),
       0,
       stream,
       signals,

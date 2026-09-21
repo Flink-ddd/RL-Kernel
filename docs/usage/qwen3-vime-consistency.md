@@ -233,8 +233,9 @@ passing sealed run contains `COMPLETE`.
 
 ## ROCm MI300X and gfx942
 
-ROCm shares the `rlk-repro` interface and uses the AITER/CK, RCCL and HIP Graph
-runner. PR #432 already contains #430; the ROCm changes build on #432's canonical
+ROCm shares the `rlk-repro` interface and uses Triton chunked Attention forward,
+AITER/CK deterministic backward, RCCL and HIP Graph in consistency mode.
+PR #432 already contains #430; the ROCm changes build on #432's canonical
 shards and configurable sampling.
 
 Activate the existing ROCm environment and select the machine profile once.
@@ -245,7 +246,7 @@ The [companion patch bundle](../../examples/vime_rocm_attention_ablation/compani
 records exact bases, patch hashes and validation scope.
 
 ```bash
-cd /workspace/rocm-unified-20260919/rl-kernel
+cd /path/to/RL-Kernel
 export PATH="$PWD/bin:/opt/venv/bin:$PATH"
 export RLK_REPRO_PROFILE="$PWD/examples/vime_rocm_attention_ablation/profiles/mi300x-qwen3-8b.json"
 
@@ -293,6 +294,13 @@ set through VIME to the existing deterministic logp kernel. There is no fixed
 transport cost; one-round timings include warmup and are not steady-state
 performance estimates. Top-k filtering and temperature zero are not supported
 by the strict replay contract and are rejected rather than ignored.
+
+Consistency mode now uses the HIP sparse logp/monitoring-entropy fusion for
+retained top-p supports, while top-p=1 uses the full-vocabulary strict scorer.
+Rebuild the extension and apply the updated VIME companion patch. See the
+[performance reproduction command](rocm-sparse-performance.md) for the TP4/CP2
+configuration, explicit sampling/LR options, and limits of the historical
+4.44% end-to-end throughput comparison. Rollout-logprob reuse remains off.
 
 The direct `examples.vime_rocm_attention_ablation.run_qwen3_8b` module remains
 available for older scripts. `--num-rollout` is its compatibility alias.

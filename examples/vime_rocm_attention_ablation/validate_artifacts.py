@@ -433,17 +433,54 @@ def _validate_strict_dense_record(
             errors.append(f"{label} did not prove the ROCm fixed-tree FFN reduction")
         return
 
-    expected_entrypoint = (
-        "rocm_deterministic_linear_logp_tp"
-        if framework == "megatron"
-        else "rocm_vocab_parallel_logp_from_local_logits_tp"
+    sparse = _has_exact_value(
+        provenance,
+        {"logprob_kernel_backend"},
+        "rlkernel.sparse_nucleus.hip_serial_deterministic.v12",
     )
-    if not _has_exact_value(
-        provenance, {"logprob_kernel_backend"}, ROCM_LOGP_KERNEL_BACKEND_ID
-    ):
-        errors.append(f"{label} did not prove the ROCm WS2 logp kernel")
-    if not _has_exact_value(provenance, {"strict_entrypoint"}, expected_entrypoint):
-        errors.append(f"{label} did not prove strict entrypoint {expected_entrypoint!r}")
+    if sparse:
+        replicated = _has_exact_value(
+            provenance, {"strict_entrypoint"}, "sparse_nucleus_logp_from_replicated_logits"
+        )
+        if replicated:
+            if framework != "vllm":
+                errors.append(f"{label} replicated sparse scorer is inference-only")
+            for key, value in {
+                "replicated_logits_reused": True,
+                "additional_tp_collective": False,
+                "preparation_backend": "rlkernel.sparse_nucleus.hip_replicated.v1",
+            }.items():
+                proven = (
+                    any(item is value for item in _values_for_keys(provenance, {key}))
+                    if isinstance(value, bool) else _has_exact_value(provenance, {key}, value)
+                )
+                if not proven:
+                    errors.append(f"{label} did not prove replicated sparse {key}={value!r}")
+        for key, value in {
+            "strict_entrypoint": (
+                "sparse_nucleus_logp_from_replicated_logits" if replicated
+                else "sparse_nucleus_logp_from_local_logits_tp"
+            ),
+            "contract_version": "sparse-nucleus-hip-serial-deterministic-v12",
+        }.items():
+            if not _has_exact_value(provenance, {key}, value):
+                errors.append(f"{label} did not prove sparse logp {key}={value!r}")
+        if not any(
+            value is True for value in _values_for_keys(provenance, {"lm_head_result_reused"})
+        ):
+            errors.append(f"{label} did not prove sparse logp lm_head_result_reused=True")
+    else:
+        expected_entrypoint = (
+            "rocm_deterministic_linear_logp_tp"
+            if framework == "megatron"
+            else "rocm_vocab_parallel_logp_from_local_logits_tp"
+        )
+        if not _has_exact_value(
+            provenance, {"logprob_kernel_backend"}, ROCM_LOGP_KERNEL_BACKEND_ID
+        ):
+            errors.append(f"{label} did not prove the ROCm WS2 logp kernel")
+        if not _has_exact_value(provenance, {"strict_entrypoint"}, expected_entrypoint):
+            errors.append(f"{label} did not prove strict entrypoint {expected_entrypoint!r}")
     deterministic_values = _values_for_keys(provenance, {"deterministic_linear_logp"})
     if not deterministic_values or not any(value is True for value in deterministic_values):
         errors.append(f"{label} did not prove deterministic linear logp")

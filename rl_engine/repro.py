@@ -515,6 +515,7 @@ def _runner_command(paths: Paths, profile: dict[str, Any], args: argparse.Namesp
             "rollout-temperature": args.rollout_temperature,
             "rollout-top-p": args.rollout_top_p,
             "rollout-top-k": args.rollout_top_k,
+            "grpo-std-normalization": args.grpo_std_normalization,
             "lr": args.lr,
             "weight-decay": args.weight_decay,
             "kl-coef": args.kl_coef,
@@ -552,6 +553,8 @@ def _runner_command(paths: Paths, profile: dict[str, Any], args: argparse.Namesp
             if value is not None:
                 command.extend([f"--{name.replace('_', '-')}", str(value)])
         return command
+    if args.grpo_std_normalization != "enabled":
+        raise ReproError("--grpo-std-normalization disabled currently requires --backend rocm")
     rocm_only = [
         name for name in (
             "ray_port", "ray_dashboard_port", "samples_per_prompt", "global_batch_size",
@@ -918,6 +921,12 @@ def build_parser() -> argparse.ArgumentParser:
             "--max-tokens-per-gpu", type=int, default=None,
             help="training microbatch token budget per CP rank; defaults to 1024 / CP, preserving the logical microbatch budget",
         )
+        command_parser.add_argument(
+            "--grpo-std-normalization",
+            choices=("enabled", "disabled"),
+            default="enabled",
+            help="ROCm GRPO advantage normalization",
+        )
         command_parser.add_argument("--lr", type=float, default=5e-7)
         command_parser.add_argument("--weight-decay", type=float, default=0.1)
         command_parser.add_argument(
@@ -982,6 +991,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "temperature",
                 "top-p",
                 "top-k",
+                "grpo-std-normalization",
                 "lr",
                 "weight-decay",
                 "kl-coef",

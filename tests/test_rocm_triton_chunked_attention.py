@@ -286,6 +286,41 @@ def test_unmasked_fast_path_matches_masked_path_bitwise(length):
     assert torch.equal(decode, prefill[positions])
 
 
+def test_decode_sequence_metadata_graph_replay():
+    torch.manual_seed(19)
+    k_cache, v_cache, table, _dense = _paged([1500, 700, 33])
+    q = torch.randn(3, HQ, D, device=DEV, dtype=torch.bfloat16)
+    cu = torch.arange(4, device=DEV, dtype=torch.int32)
+    lengths = torch.tensor([1500, 700, 33], device=DEV, dtype=torch.int32)
+    mapping = torch.arange(3, device=DEV, dtype=torch.int32)
+
+    def run(seq_of_token):
+        return A.paged_attention_forward(
+            q, k_cache, v_cache, cu_seqlens_q=cu, block_table=table,
+            seqlen_k=lengths, max_seqlen_q=1, scale=SCALE,
+            seq_of_token=seq_of_token,
+        )
+
+    run(None)
+    run(mapping)
+    torch.cuda.synchronize()
+    implicit_graph, explicit_graph = torch.cuda.CUDAGraph(), torch.cuda.CUDAGraph()
+    with torch.cuda.graph(implicit_graph):
+        implicit = run(None)
+    with torch.cuda.graph(explicit_graph):
+        explicit = run(mapping)
+    for live_lengths in ([1500, 700, 33], [1024, 513, 17], [1025, 64, 1]):
+        q.normal_()
+        lengths.copy_(torch.tensor(live_lengths, device=DEV, dtype=torch.int32))
+        implicit_graph.replay()
+        explicit_graph.replay()
+        reference = _run(q, k_cache, v_cache, table, cu, lengths, 1, schedule="monolithic")
+        for a, b, expected in zip(implicit, explicit, reference, strict=True):
+            bits = torch.int16 if a.dtype == torch.bfloat16 else torch.int32
+            assert torch.equal(a.view(bits), expected.view(bits))
+            assert torch.equal(b.view(bits), expected.view(bits))
+
+
 def test_output_buffer_and_padded_rows_are_left_alone():
     torch.manual_seed(3)
     k_cache, v_cache, table, _dense = _paged([100, 50])
