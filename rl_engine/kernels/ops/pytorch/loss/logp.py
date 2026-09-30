@@ -75,7 +75,15 @@ class NativeLogpOp:
         self._validate_output_shape(output, logits)
         indices = self._flat_row_indices(row_indices, logits)
         values = self._selected_logps(logits, token_ids, output_dtype=output.dtype)
-        output.reshape(-1)[indices] = values.reshape(-1)[indices]
+        flat_values = values.reshape(-1)
+        if output.is_contiguous():
+            output.reshape(-1)[indices] = flat_values[indices]
+        elif indices.numel():
+            # ``reshape`` may allocate for a strided output view. Convert the
+            # logical flat rows back to coordinates so the caller's storage is
+            # updated in place.
+            coordinates = torch.unravel_index(indices, output.shape)
+            output[coordinates] = flat_values[indices]
         return output
 
     def indexed_fp32(

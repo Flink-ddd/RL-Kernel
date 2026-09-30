@@ -88,6 +88,68 @@ def test_native_fused_logp_indexed_out_preserves_inactive_rows_cpu():
     assert torch.equal(result[~mask], torch.full_like(result[~mask], 123.0))
 
 
+@pytest.mark.parametrize("method_name", ("indexed_out", "online_indexed_out"))
+@pytest.mark.parametrize("layout", ("transpose", "slice"))
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param(
+            "cuda",
+            marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available"),
+        ),
+    ],
+)
+def test_native_fused_logp_indexed_out_updates_noncontiguous_output(
+    method_name: str, layout: str, device: str
+):
+    logits = torch.zeros(2, 3, 4, device=device)
+    token_ids = torch.zeros(2, 3, dtype=torch.long, device=device)
+    row_indices = torch.tensor([0, 5], device=device)
+    expected = torch.full((2, 3), 99.0, device=device)
+    expected[0, 0] = -torch.log(torch.tensor(4.0, device=device))
+    expected[1, 2] = -torch.log(torch.tensor(4.0, device=device))
+    backing = torch.full((3, 2) if layout == "transpose" else (2, 6), 99.0, device=device)
+    output = backing.t() if layout == "transpose" else backing[:, ::2]
+    assert not output.is_contiguous()
+
+    result = getattr(NativeLogpOp(), method_name)(logits, token_ids, row_indices, output)
+
+    assert result is output
+    assert torch.equal(result, expected)
+    if layout == "slice":
+        assert torch.equal(backing[:, 1::2], torch.full_like(output, 99.0))
+
+
+@pytest.mark.parametrize("method_name", ("indexed_out", "online_indexed_out"))
+@pytest.mark.parametrize("layout", ("transpose", "slice"))
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param(
+            "cuda",
+            marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available"),
+        ),
+    ],
+)
+def test_native_fused_logp_indexed_out_empty_indices_preserves_noncontiguous_output(
+    method_name: str, layout: str, device: str
+):
+    logits = torch.randn(2, 3, 5, device=device)
+    token_ids = torch.randint(0, 5, (2, 3), device=device)
+    backing = torch.full((3, 2) if layout == "transpose" else (2, 6), 77.0, device=device)
+    output = backing.t() if layout == "transpose" else backing[:, ::2]
+
+    result = getattr(NativeLogpOp(), method_name)(
+        logits, token_ids, torch.empty(0, dtype=torch.long, device=device), output
+    )
+
+    assert result is output
+    assert torch.equal(result, torch.full_like(result, 77.0))
+    assert torch.equal(backing, torch.full_like(backing, 77.0))
+
+
 def test_native_fused_logp_online_out_matches_reference_cpu():
     logits = torch.randn(2, 5, 23)
     token_ids = torch.randint(0, logits.size(-1), (2, 5))
