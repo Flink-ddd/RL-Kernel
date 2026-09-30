@@ -103,6 +103,7 @@ def test_native_fused_logp_indexed_out_preserves_inactive_rows_cpu():
 def test_native_fused_logp_indexed_out_updates_noncontiguous_output(
     method_name: str, layout: str, device: str
 ):
+    """Verify indexed writes reach a strided view and preserve unselected storage."""
     logits = torch.zeros(2, 3, 4, device=device)
     token_ids = torch.zeros(2, 3, dtype=torch.long, device=device)
     row_indices = torch.tensor([0, 5], device=device)
@@ -136,6 +137,7 @@ def test_native_fused_logp_indexed_out_updates_noncontiguous_output(
 def test_native_fused_logp_indexed_out_empty_indices_preserves_noncontiguous_output(
     method_name: str, layout: str, device: str
 ):
+    """Verify empty selections preserve the output view and its entire backing storage."""
     logits = torch.randn(2, 3, 5, device=device)
     token_ids = torch.randint(0, 5, (2, 3), device=device)
     backing = torch.full((3, 2) if layout == "transpose" else (2, 6), 77.0, device=device)

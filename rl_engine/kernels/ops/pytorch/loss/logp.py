@@ -72,6 +72,14 @@ class NativeLogpOp:
         row_indices: torch.Tensor,
         output: torch.Tensor,
     ) -> torch.Tensor:
+        """Write selected-token log probabilities into selected output rows.
+
+        ``row_indices`` indexes the logically flattened leading dimensions of
+        ``logits``. ``output`` must have that leading shape; writes use its
+        dtype and update its storage in place, including transposed and sliced
+        views. Return the supplied output tensor, preserving unselected rows.
+        Empty indices leave the output unchanged.
+        """
         self._validate_output_shape(output, logits)
         indices = self._flat_row_indices(row_indices, logits)
         values = self._selected_logps(logits, token_ids, output_dtype=output.dtype)
