@@ -104,12 +104,12 @@ def test_native_fused_logp_indexed_out_updates_noncontiguous_output(
     method_name: str, layout: str, device: str
 ):
     """Verify indexed writes reach a strided view and preserve unselected storage."""
-    logits = torch.zeros(2, 3, 4, device=device)
-    token_ids = torch.zeros(2, 3, dtype=torch.long, device=device)
-    row_indices = torch.tensor([0, 5], device=device)
+    logits = torch.arange(24, device=device, dtype=torch.float32).reshape(2, 3, 4)
+    token_ids = torch.tensor([[0, 1, 2], [3, 0, 1]], device=device)
+    row_indices = torch.tensor([4, 1, 3], device=device)
     expected = torch.full((2, 3), 99.0, device=device)
-    expected[0, 0] = -torch.log(torch.tensor(4.0, device=device))
-    expected[1, 2] = -torch.log(torch.tensor(4.0, device=device))
+    reference = _reference_selected_logp(logits, token_ids)
+    expected.reshape(-1)[row_indices] = reference.reshape(-1)[row_indices]
     backing = torch.full((3, 2) if layout == "transpose" else (2, 6), 99.0, device=device)
     output = backing.t() if layout == "transpose" else backing[:, ::2]
     assert not output.is_contiguous()
@@ -117,7 +117,7 @@ def test_native_fused_logp_indexed_out_updates_noncontiguous_output(
     result = getattr(NativeLogpOp(), method_name)(logits, token_ids, row_indices, output)
 
     assert result is output
-    assert torch.equal(result, expected)
+    torch.testing.assert_close(result, expected)
     if layout == "slice":
         assert torch.equal(backing[:, 1::2], torch.full_like(output, 99.0))
 
