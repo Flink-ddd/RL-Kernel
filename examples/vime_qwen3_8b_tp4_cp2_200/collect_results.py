@@ -16,7 +16,6 @@ from pathlib import Path
 from statistics import mean
 from typing import Any
 
-
 RECORD_RE = re.compile(r"\b(rollout|step|perf)\s+(\d+):\s+(\{.*\})\s*$")
 
 

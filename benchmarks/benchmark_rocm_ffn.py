@@ -33,10 +33,7 @@ from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
 from transformers.models.qwen3.modeling_qwen3 import Qwen3MLP
 
 import rl_engine.kernels.ops.triton.ffn.ffn as ffn_module
-from rl_engine.kernels.ops.triton.ffn import (
-    pack_qwen3_ffn_forward_weights,
-    qwen3_ffn,
-)
+from rl_engine.kernels.ops.triton.ffn import pack_qwen3_ffn_forward_weights, qwen3_ffn
 
 _DISTRIBUTED_CONFIGS: dict[int, tuple[tuple[str, int, int, bool], ...]] = {
     2: (("tp2", 2, 1, False), ("tp2_sp", 2, 1, True)),

@@ -13,7 +13,6 @@ from pathlib import Path
 from statistics import mean, pstdev
 from typing import Any
 
-
 COLORS = {"native": "#6b7280", "G10": "#2563eb", "consistency": "#dc2626", "G11": "#059669"}
 MARKERS = {"native": "o", "G10": "x", "consistency": "D", "G11": "+"}
 LABELS = {

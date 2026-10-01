@@ -40,7 +40,6 @@ from rl_engine.kernels.ops.triton.matmul.det_gemm import (
     _device_tree_plan,
 )
 
-
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _KERNEL_SOURCE = _REPO_ROOT / "rl_engine/kernels/ops/triton/matmul/det_gemm.py"
 

@@ -7,12 +7,8 @@ import torch
 
 import rl_engine.kernels.ops.pytorch.ffn.ffn as ffn_module
 from rl_engine.integrations.framework_operators import VllmFFNOperator
-from rl_engine.kernels.ops.matmul.det_gemm import (
-    DetGemmOp,
-    det_gemm_linear_weight_gradient,
-)
+from rl_engine.kernels.ops.matmul.det_gemm import DetGemmOp, det_gemm_linear_weight_gradient
 from rl_engine.kernels.registry import _default_semantic_descriptors
-
 
 pytestmark = pytest.mark.skipif(
     getattr(torch.version, "hip", None) is None,

@@ -42,7 +42,6 @@ from rl_engine.kernels.ops.triton.ffn import (
     qwen3_ffn,
 )
 
-
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _INPUT_SEEDS = {1: 3010, 8: 3012, 32: 3014}
 _KEY_AVERAGE_FIELDS = (

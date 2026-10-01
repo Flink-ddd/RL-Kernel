@@ -19,7 +19,6 @@ from examples.vime_rocm_attention_ablation.validate_artifacts import (
     write_report,
 )
 
-
 RUN_DIR = Path("/app/model/vime-runs/pr393-200round-p-p")
 
 

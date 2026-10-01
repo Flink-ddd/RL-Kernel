@@ -12,7 +12,6 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-
 DEFAULT_URL = (
     "https://huggingface.co/datasets/BytedTsinghua-SIA/DAPO-Math-17k/"
     "resolve/main/data/train-00000-of-00001.parquet"
