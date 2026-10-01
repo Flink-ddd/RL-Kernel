@@ -217,9 +217,15 @@ def _refresh_lm_head_weight_cache(
             return state
         state.valid = False
         state.refresh_pending = False
+        if state.weight_t is None:
+            raise RuntimeError("strict ROCm LM-head cache state has an invalid weight")
         cache_data_ptr = int(state.weight_t.data_ptr())
         refreshed = prepare_weight(weight, out=state.weight_t)
-        if refreshed is not state.weight_t or int(refreshed.data_ptr()) != cache_data_ptr:
+        if (
+            refreshed is None
+            or refreshed is not state.weight_t
+            or int(refreshed.data_ptr()) != cache_data_ptr
+        ):
             raise RuntimeError("strict ROCm LM-head refresh replaced stable cache storage")
         _record_lm_head_weight_cache_refresh(state, weight)
 
@@ -244,7 +250,7 @@ def _validated_lm_head_weight_cache(
         raise RuntimeError("strict ROCm LM-head cache was not prepared after model loading")
     state: _LmHeadWeightCacheState = state_value
     cached_weight = state.weight_t
-    if not isinstance(cached_weight, torch.Tensor):
+    if cached_weight is None or not isinstance(cached_weight, torch.Tensor):
         raise RuntimeError("strict ROCm LM-head cache state has an invalid weight")
     if (
         state.source is not weight
@@ -253,6 +259,7 @@ def _validated_lm_head_weight_cache(
         raise RuntimeError("strict ROCm LM-head cache is not bound to the active weight")
     if getattr(layer, _STRICT_LM_HEAD_CACHE_BUFFER, None) is not cached_weight:
         raise RuntimeError("strict ROCm LM-head cache buffer was replaced")
+    assert cached_weight is not None
 
     current_source = (
         int(weight.data_ptr()),
@@ -297,7 +304,11 @@ def _validated_lm_head_weight_cache(
     except Exception:
         state.refresh_pending = False
         raise
-    if refreshed is not cached_weight or int(refreshed.data_ptr()) != cache_data_ptr:
+    if (
+        refreshed is None
+        or refreshed is not cached_weight
+        or int(refreshed.data_ptr()) != cache_data_ptr
+    ):
         state.refresh_pending = False
         raise RuntimeError("strict ROCm LM-head refresh replaced stable cache storage")
     _record_lm_head_weight_cache_refresh(state, weight)
@@ -347,6 +358,8 @@ def _patch_qwen3_layer_alignment_diagnostics() -> None:
         if match is None:
             raise RuntimeError(f"cannot recover Qwen3 decoder layer from prefix {prefix!r}")
         instance._rl_kernel_layer_diagnostic_index = int(match.group(1))
+        if config is None:
+            raise RuntimeError("Qwen3 layer diagnostics require a model configuration")
         instance._rl_kernel_layer_diagnostic_count = int(config.num_hidden_layers)
 
     def forward_wrapped(
@@ -492,7 +505,7 @@ def _patch_qwen3_layer_alignment_diagnostics() -> None:
     Qwen3DecoderLayer.forward = forward_wrapped
     setattr(Qwen3Attention, _STRICT_LAYER_DIAGNOSTIC_PATCH_MARKER, original_attention_forward)
     Qwen3Attention.forward = attention_forward_wrapped
-    StrictRocmAttentionRuntime._gather_paged_row = staticmethod(gather_paged_row_wrapped)
+    setattr(StrictRocmAttentionRuntime, "_gather_paged_row", staticmethod(gather_paged_row_wrapped))
 
 
 def _o_proj_collective_backend() -> str | None:
@@ -957,9 +970,8 @@ def _patch_rocm_weight_cache_refresh() -> None:
     if torch.version.hip is None:
         return
     from vllm.v1.worker.gpu_worker import Worker
-    from rl_engine.kernels.ops.rocm.matmul.det_gemm import (
-        refresh_cached_weight_transposes,
-    )
+
+    from rl_engine.kernels.ops.rocm.matmul.det_gemm import refresh_cached_weight_transposes
 
     if hasattr(Worker, _STRICT_WEIGHT_CACHE_REFRESH_MARKER):
         return
@@ -1660,7 +1672,7 @@ def _register_attention_backend(integration: VllmIntegration) -> None:
                     getattr(config.parallel_config, "prefill_context_parallel_size", 1)
                 )
                 if requested_cp > 1 and operator._pcp is None:
-                    from vllm.distributed import get_pcp_group, get_dcp_group
+                    from vllm.distributed import get_dcp_group, get_pcp_group
 
                     pcp = get_pcp_group()
                     if pcp.world_size != requested_cp:

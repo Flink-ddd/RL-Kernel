@@ -9,7 +9,7 @@ import sys
 import threading
 from collections.abc import Iterable
 from contextlib import nullcontext
-from types import TracebackType
+from types import ModuleType, TracebackType
 from typing import Any
 
 import torch
@@ -274,7 +274,7 @@ class DeterministicCollective:
                 "the RL-Kernel CUDA extension lacks deterministic collectives: "
                 + ", ".join(missing)
             )
-        self._extension = _C
+        self._extension: ModuleType = _C
 
     def _load_npu_extension(self) -> None:
         try:

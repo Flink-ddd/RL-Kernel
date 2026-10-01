@@ -53,9 +53,7 @@ from rl_engine.kernels.attention_contract import (
     ReductionSpec,
     ShardingSpec,
 )
-from rl_engine.kernels.ops.cuda.attention.strict_runtime import (
-    StrictCUDAAttentionRuntime,
-)
+from rl_engine.kernels.ops.cuda.attention.strict_runtime import StrictCUDAAttentionRuntime
 
 
 def test_vllm_tp1_ffn_reports_no_physical_collective(monkeypatch):
@@ -974,6 +972,7 @@ def test_vllm_rocm_rotary_reuses_one_table_for_query_and_key(monkeypatch):
             return query, key
 
     monkeypatch.setattr(torch.version, "hip", "test")
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
     monkeypatch.setattr(
         "rl_engine.kernels.ops.rocm.rotary_embedding.rope.RocmDeterministicRoPEOp",
         FakeOperator,

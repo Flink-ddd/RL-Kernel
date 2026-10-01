@@ -397,7 +397,7 @@ class TorchDistributedDeterministicCollective:
         pieces = tuple(packed_out.split(tuple(value.size(-1) for value in values), dim=-1))
         if outs is None:
             return pieces
-        result: list[torch.Tensor] = []
+        result = []
         for piece, out in zip(pieces, outs, strict=True):
             out.copy_(piece)
             result.append(out)

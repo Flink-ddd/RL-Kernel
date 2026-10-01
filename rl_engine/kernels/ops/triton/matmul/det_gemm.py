@@ -273,8 +273,8 @@ def _device_tree_plan(k_size: int, device: torch.device) -> _DeviceTreePlan:
 
         levels = []
         for operations in host.reduction_levels:
-            lower, upper, output = zip(*operations, strict=True)
-            levels.append((indices(lower), indices(upper), indices(output)))
+            lower_nodes, upper_nodes, output_nodes = zip(*operations, strict=True)
+            levels.append((indices(lower_nodes), indices(upper_nodes), indices(output_nodes)))
         fused_pairs = []
         leaf_reduction = None
         fused_pairs_after_leaf = []
@@ -869,6 +869,7 @@ def _triton_tree_gemm(
         and plan.rocm_leaf_reduction is not None
     )
     if fuse_leaf_reduction:
+        assert plan.rocm_leaf_reduction is not None
         operation_count = len(plan.host.reduction_levels[0])
         fused_leaf_grid = (
             (tiles_n, tiles_m, operation_count)
@@ -996,8 +997,8 @@ def _triton_tree_gemm(
                     BLOCK=reduction_block,
                 )
             else:
-                grid = (len(operations), triton.cdiv(m_size * n_size, reduction_block))
-                _det_gemm_tree_reduce_kernel[grid](
+                reduction_grid = (len(operations), triton.cdiv(m_size * n_size, reduction_block))
+                _det_gemm_tree_reduce_kernel[reduction_grid](
                     workspace,
                     lower,
                     upper,

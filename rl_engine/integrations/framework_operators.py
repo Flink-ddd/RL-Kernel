@@ -291,6 +291,7 @@ def _fused_rms_norm_input(
         raise RuntimeError(f"strict {name} does not support zero-centered gamma")
     eps = float(getattr(projection, "eps"))
     from rl_engine.integrations.canonical_cp import rms_norm
+
     return rms_norm(hidden_states, weight, eps)
 
 
@@ -782,6 +783,7 @@ class _MegatronCPWeightGradient(torch.autograd.Function):
     @staticmethod
     def forward(ctx, weight, cp_world):
         from rl_engine.integrations.canonical_cp import current_layout
+
         ctx.cp_world = cp_world
         ctx.cp_layout = current_layout()
         return weight
@@ -790,6 +792,7 @@ class _MegatronCPWeightGradient(torch.autograd.Function):
     def backward(ctx, grad):
         if ctx.cp_layout is not None:
             from rl_engine.integrations.canonical_cp import replica_parameter_gradient
+
             grad = replica_parameter_gradient(grad, ctx.cp_world, ctx.cp_layout.cp_rank)
         else:
             grad = grad / ctx.cp_world
@@ -1020,7 +1023,7 @@ class VllmAttentionOperator:
         self._rocm_paged_metadata_value: dict[str, Any] | None = None
         self._rocm_kv_indptr_cache: dict[tuple[Any, ...], torch.Tensor] = {}
         self._phase_provenance: dict[str, dict[str, Any]] = {}
-        self._pcp = None
+        self._pcp: Any | None = None
 
     def bind_inference(self) -> None:
         """Resolve the backend after vLLM has selected the worker CUDA device."""
@@ -1821,19 +1824,23 @@ class VllmAttentionOperator:
         if key_cache.dtype != query.dtype or value_cache.dtype != query.dtype:
             raise RuntimeError("strict vLLM Attention requires an unquantized KV cache")
         if self._pcp is not None:
-            result = self._pcp.forward(runtime, impl, query, output, attn_metadata,
-                                       key_cache, value_cache, block_table)
-            self._record_phase_provenance("pcp", {
-                "framework_layout": "vllm_pcp_interleaved_kv",
-                "cp_world_size": self._pcp.world,
-                "cp_rank": self._pcp.rank,
-                "tp_world_size": tp_world,
-                "runtime_platform": runtime_platform,
-                "kv_storage": "token_sharded",
-                "attention_queries": "disjoint_cp_partitions",
-                "attention_merge": "rank_ordered_output_gather_no_reduction",
-                "fallback": False,
-            })
+            result = self._pcp.forward(
+                runtime, impl, query, output, attn_metadata, key_cache, value_cache, block_table
+            )
+            self._record_phase_provenance(
+                "pcp",
+                {
+                    "framework_layout": "vllm_pcp_interleaved_kv",
+                    "cp_world_size": self._pcp.world,
+                    "cp_rank": self._pcp.rank,
+                    "tp_world_size": tp_world,
+                    "runtime_platform": runtime_platform,
+                    "kv_storage": "token_sharded",
+                    "attention_queries": "disjoint_cp_partitions",
+                    "attention_merge": "rank_ordered_output_gather_no_reduction",
+                    "fallback": False,
+                },
+            )
             return result
         if runtime_platform == "rocm":
             direct_output = self._rocm_direct_paged(
@@ -2316,11 +2323,13 @@ class VllmLogpOperator:
         local_logits = None
         sampling_mask = None
         replicated_sparse = (
-            self._strict_linear_logp and self._worker_sampler
-            and torch.version.hip is not None and not torch.is_grad_enabled()
-            and bool((sampler.sampling_states.top_p.np[
-                sampling_metadata.idx_mapping_np
-            ] != 1.0).any())
+            self._strict_linear_logp
+            and self._worker_sampler
+            and torch.version.hip is not None
+            and not torch.is_grad_enabled()
+            and bool(
+                (sampler.sampling_states.top_p.np[sampling_metadata.idx_mapping_np] != 1.0).any()
+            )
         )
         sampling_temperature = getattr(sampling_metadata, "temperature", None)
         if sampling_temperature is None:
@@ -2361,7 +2370,7 @@ class VllmLogpOperator:
             # Preserve raw model logits before vLLM's sampler transforms its
             # input in place (temperature, penalties, and masking).
             if replicated_sparse:
-                local_logits = source_logits[:, :context.real_vocab_size].clone(
+                local_logits = source_logits[:, : context.real_vocab_size].clone(
                     memory_format=torch.contiguous_format
                 )
             elif available == local_vocab:
@@ -2387,20 +2396,21 @@ class VllmLogpOperator:
                             available,
                         )
                     )
-            if (getattr(torch.version, "hip", None) is None
-                    and (getattr(sampling_metadata, "top_p", None) is not None
-                         or getattr(sampling_metadata, "top_k", None) is not None)):
+            if getattr(torch.version, "hip", None) is None and (
+                getattr(sampling_metadata, "top_p", None) is not None
+                or getattr(sampling_metadata, "top_k", None) is not None
+            ):
                 from rl_engine.integrations.sampling import sampling_keep_mask
 
                 complete_mask = sampling_keep_mask(
-                    source_logits[:, :context.real_vocab_size],
+                    source_logits[:, : context.real_vocab_size],
                     temperature=support_temperature,
                     top_p=getattr(sampling_metadata, "top_p", None),
                     top_k=getattr(sampling_metadata, "top_k", None),
                 )
                 sampling_mask = torch.zeros_like(local_logits, dtype=torch.bool)
                 sampling_mask[:, :available] = complete_mask[
-                    :, context.vocab_start_index:context.vocab_start_index + available
+                    :, context.vocab_start_index : context.vocab_start_index + available
                 ]
         if self._worker_sampler:
             result = self._native_forward(sampler, logits, sampling_metadata)
@@ -2459,12 +2469,15 @@ class VllmLogpOperator:
                     top_p_replay = True
                 if top_p_replay:
                     nucleus_ids = torch.where(
-                        torch.isfinite(replay_values), replay_ids,
+                        torch.isfinite(replay_values),
+                        replay_ids,
                         torch.full_like(replay_ids, -1),
                     )
                     if replicated_sparse:
                         selected = self._linear_logp.from_replicated_logits_sparse_nucleus(
-                            local_logits, token_ids, nucleus_ids,
+                            local_logits,
+                            token_ids,
+                            nucleus_ids,
                             real_vocab_size=context.real_vocab_size,
                             tp_group=context.tp_group,
                             temperature=float(os.getenv("RL_KERNEL_VLLM_TEMPERATURE", "1.0")),
@@ -2513,22 +2526,24 @@ class VllmLogpOperator:
                 )
             strict_provenance = self._linear_logp.provenance
             expected_entrypoints = {
-                ("sparse_nucleus_logp_from_local_logits_tp" if top_p_replay
-                 else "rocm_vocab_parallel_logp_from_local_logits_tp")
-                if torch.version.hip is not None
-                else "sm90_deterministic_logp_from_local_logits_tp"
+                (
+                    (
+                        "sparse_nucleus_logp_from_local_logits_tp"
+                        if top_p_replay
+                        else "rocm_vocab_parallel_logp_from_local_logits_tp"
+                    )
+                    if torch.version.hip is not None
+                    else "sm90_deterministic_logp_from_local_logits_tp"
+                )
             }
             if top_p_replay and torch.version.hip is None:
-                expected_entrypoints.add(
-                    "sm90_deterministic_top_p_logp_from_local_logits_tp"
-                )
+                expected_entrypoints.add("sm90_deterministic_top_p_logp_from_local_logits_tp")
             if replicated_sparse:
                 expected_entrypoints.add("sparse_nucleus_logp_from_replicated_logits")
             if (
                 strict_provenance.get("deterministic_linear_logp") is not True
                 or strict_provenance.get("actual_backend") != self._linear_logp.backend_id
-                or strict_provenance.get("strict_entrypoint")
-                not in expected_entrypoints
+                or strict_provenance.get("strict_entrypoint") not in expected_entrypoints
             ):
                 raise RuntimeError(
                     "strict vLLM rollout linear_logp did not execute the deterministic "

@@ -131,7 +131,7 @@ class StrictRocmAttentionRuntime:
         core: Any | None = None,
         communication: Any | None = None,
     ) -> None:
-        self._core = StrictRocmAiterCKAttentionCore() if core is None else core
+        self._core: Any = StrictRocmAiterCKAttentionCore() if core is None else core
         self._communication = (
             RCCLAGRSAttentionCPCommunication(process_group=process_group)
             if communication is None
@@ -146,6 +146,7 @@ class StrictRocmAttentionRuntime:
         self.communication_executed = False
         self._page_bounds_epoch_owner = object()
         self._page_bounds_validation: _PageBoundsValidation | None = None
+        self._paged_bhsd_workspaces: dict[tuple[Any, ...], tuple[torch.Tensor, torch.Tensor]] = {}
         self._causal_prefill_position_cache: tuple[torch.device, int, torch.Tensor] | None = None
         self._position_plan_cache: dict[
             tuple[int, int, int, bool],
@@ -317,7 +318,7 @@ class StrictRocmAttentionRuntime:
             )
 
         if cp_world_size > 1:
-            if q_sort is None or inverse_q_sort is None:
+            if q_sort is None or inverse_q_sort is None or plan is None:
                 raise RuntimeError("CP Attention requires a framework position reorder")
             out_rank_packed = _gather_sequence(out_sorted, inverse_q_sort)
             lse_rank_packed = _gather_sequence(lse_sorted, inverse_q_sort)
@@ -560,6 +561,7 @@ class StrictRocmAttentionRuntime:
                 out=out,
                 return_lse=return_lse,
             )
+            core_provenance: dict[str, Any] | None
             core_provenance = dict(core_result.provenance)
             backend = (
                 core_provenance.get("attention_backend")
