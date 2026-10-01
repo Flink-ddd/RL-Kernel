@@ -465,17 +465,14 @@ def _single_gpu_benchmarks(
                 ),
             }
         )
-        del (
-            hidden,
-            grad_output,
-            official_hidden,
-            triton_inputs,
-            triton_forward_weights,
-        )
+        # Release tensors without deleting bindings captured by timing callbacks.
+        hidden = grad_output = official_hidden = None
+        triton_inputs = triton_forward_weights = None
         torch.cuda.empty_cache()
 
     # This is intentionally separate from the determinism and speed results.
-    del official, forward_weights, gate_weight, up_weight, down_weight
+    official = forward_weights = None
+    del gate_weight, up_weight, down_weight
     torch.cuda.empty_cache()
     tokens = 8
     fp32_hidden = _randn(
@@ -512,8 +509,6 @@ def _single_gpu_benchmarks(
         }
     )
     return results
-
-
 
 
 def _mesh_groups(
@@ -596,8 +591,6 @@ def _slowest_rank_summary(
     return _summary_ms(slowest)
 
 
-
-
 def _distributed_ffn_benchmark(
     rank: int,
     world_size: int,
@@ -644,7 +637,8 @@ def _distributed_ffn_benchmark(
         grad_output_full,
     ).detach().clone()
     tp1_grads = [value.grad.detach().clone() for value in tp1_inputs]
-    del tp1_inputs, tp1_forward_weights, tp1_training_weights
+    del tp1_inputs, tp1_forward_weights
+    tp1_training_weights = None
     torch.cuda.empty_cache()
 
     meshes: dict[tuple[int, int], tuple[list[Any], list[Any]]] = {}
@@ -874,15 +868,10 @@ def _distributed_ffn_benchmark(
                     },
                 )
             )
-        del (
-            shard,
-            shard_forward_weights,
-            official_inputs,
-            triton_inputs,
-            triton_forward_weights,
-            repeat_inputs,
-            repeat_forward_weights,
-        )
+        # Release callback captures before the next topology is benchmarked.
+        shard = shard_forward_weights = official_inputs = None
+        triton_inputs = triton_forward_weights = None
+        del repeat_inputs, repeat_forward_weights
         torch.cuda.empty_cache()
         dist.barrier()
 
@@ -1018,8 +1007,6 @@ def _run_distributed_world(
                 f"world_size={world_size} worker exited with {process.exitcode}"
             )
     return result
-
-
 
 
 def _topology_exactness_rows(

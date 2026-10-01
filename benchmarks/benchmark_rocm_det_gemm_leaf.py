@@ -461,7 +461,9 @@ def _run_case(
             f"tree={tree_timing['median_ms']:.4f} ms",
             flush=True,
         )
-        del candidate_leaves, workspace, output
+        del candidate_leaves
+        # Release buffers without deleting bindings captured by timing callbacks.
+        workspace = output = None
 
     baseline_result = next(result for result in results if result["slug"] == _BASELINE.slug)
     baseline_leaf = float(baseline_result["leaf_timing"]["median_ms"])
