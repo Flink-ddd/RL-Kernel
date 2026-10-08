@@ -399,11 +399,11 @@ def _validate_rl_kernel_plugin_installation() -> None:
             "the visible rl_kernel vLLM plugin entry point has an unexpected target: " f"{values!r}"
         )
 
-    installed_name = distribution.metadata.get("Name", "RL-Kernel")
+    installed_name = cast(Mapping[str, str], distribution.metadata).get("Name", "RL-Kernel")
     owners = {
-        cast(importlib_metadata.Distribution, entry_point.dist).metadata.get(
-            "Name", cast(importlib_metadata.Distribution, entry_point.dist).name
-        )
+        cast(
+            Mapping[str, str], cast(importlib_metadata.Distribution, entry_point.dist).metadata
+        ).get("Name", cast(importlib_metadata.Distribution, entry_point.dist).name)
         for entry_point in matching
         if getattr(entry_point, "dist", None) is not None
     }
