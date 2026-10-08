@@ -288,7 +288,17 @@ class StrictRocmAttentionRuntime:
             k_sorted = _gather_sequence(global_k, k_sort)
             v_sorted = _gather_sequence(global_v, k_sort)
 
-        paged_schedule = bool(getattr(self._core, "supports_paged_schedule", False))
+        # AITER may expose ``mha_batch_prefill`` even when the selected strict
+        # backend is CK.  That entry point is useful for paged inference, but a
+        # dense train-side call must still use the pinned one-row/one-KV-group
+        # schedule: launching the whole local GQA shard changes the arithmetic
+        # with batch composition and TP degree.  The Triton backend owns a
+        # separately validated TP-invariant dense schedule and may keep its
+        # direct path.
+        paged_schedule = bool(
+            getattr(self._core, "supports_paged_schedule", False)
+            and getattr(self._core, "attention_backend", None) == "triton"
+        )
         if paged_schedule:
             core_result = self._core.forward_with_lse(
                 q_sorted,

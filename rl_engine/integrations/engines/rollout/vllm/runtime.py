@@ -1512,8 +1512,10 @@ def _patch_sampler(integration: VllmIntegration, *, strict_linear_logp: bool) ->
     if strict_linear_logp:
         operator = VllmLogpOperator(original, strict_linear_logp=True)
         integration.install_operator("logp", operator)
+    native_ffn_evidence_recorded = False
 
     def wrapped(instance: Any, *args: Any, **kwargs: Any) -> Any:
+        nonlocal native_ffn_evidence_recorded
         sampling_metadata = kwargs.get("sampling_metadata")
         if sampling_metadata is None and len(args) >= 2:
             sampling_metadata = args[1]
@@ -1529,7 +1531,10 @@ def _patch_sampler(integration: VllmIntegration, *, strict_linear_logp: bool) ->
         def native(_sampler: Any, *call_args: Any, **call_kwargs: Any) -> Any:
             return original(instance, *call_args, **call_kwargs)
 
-        return integration.execute("logp", native, instance, *args, **kwargs)
+        result = integration.execute("logp", native, instance, *args, **kwargs)
+        if not native_ffn_evidence_recorded:
+            native_ffn_evidence_recorded = _record_native_ffn_graph_completion(integration)
+        return result
 
     setattr(Sampler, _PATCH_MARKER, original)
     setattr(Sampler, "forward", wrapped)
@@ -1558,18 +1563,56 @@ def _patch_worker_sampler(integration: VllmIntegration, *, strict_linear_logp: b
         strict_linear_logp=strict_linear_logp,
     )
     integration.install_operator("logp", operator)
+    native_ffn_evidence_recorded = False
 
     def wrapped(instance: Any, *args: Any, **kwargs: Any) -> Any:
+        nonlocal native_ffn_evidence_recorded
+
         def native(_sampler: Any, *call_args: Any, **call_kwargs: Any) -> Any:
             return original(instance, *call_args, **call_kwargs)
 
         if args and _is_worker_sampler_profile_batch(args[1] if len(args) > 1 else None):
             return original(instance, *args, **kwargs)
-        return integration.execute("logp", native, instance, *args, **kwargs)
+        result = integration.execute("logp", native, instance, *args, **kwargs)
+        if not native_ffn_evidence_recorded:
+            native_ffn_evidence_recorded = _record_native_ffn_graph_completion(integration)
+        return result
 
     setattr(Sampler, _PATCH_MARKER, original)
     setattr(Sampler, "__call__", wrapped)
     integration.record_installed_hook("logp", "vllm.v1.worker.gpu.sample.sampler.Sampler.__call__")
+
+
+def _record_native_ffn_graph_completion(integration: VllmIntegration) -> bool:
+    """Record native FFN evidence after one real compiled model forward.
+
+    vLLM captures ``Qwen2MLP.forward`` inside a full accelerator graph.  The
+    generic integration boundary intentionally avoids Python bookkeeping while
+    Dynamo is tracing, so the production route otherwise has an installed hook
+    but no execution readback.  A successful, non-profile sampler call proves
+    that the preceding model graph (including the native MLP) completed.  Keep
+    this evidence outside the graph so the P/P computation remains untouched.
+    """
+
+    if integration.plan.implementation_for("ffn", "rollout") is not Implementation.PRODUCTION:
+        return False
+
+    def native_ffn_graph() -> None:
+        return None
+
+    runtime_platform = "rocm" if getattr(torch.version, "hip", None) is not None else "cuda"
+    execution_mode = "compiled_hip_graph" if runtime_platform == "rocm" else "compiled_cuda_graph"
+    integration.record_execution(
+        "ffn",
+        native_ffn_graph,
+        execution_mode=execution_mode,
+        execution_provenance={
+            "runtime_platform": runtime_platform,
+            "execution_boundary": "vllm.sampler_after_model_forward",
+            "compiled_model_forward_completed": True,
+        },
+    )
+    return True
 
 
 def _patch_tokens_api_top_logprobs() -> None:
