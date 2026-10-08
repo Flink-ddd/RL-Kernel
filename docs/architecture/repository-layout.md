@@ -5,6 +5,9 @@ of model assembly, layers, platform discovery, implementation backends, engine
 integration, native sources, and test infrastructure. RL-Kernel additionally
 owns numerical contracts and train–rollout validation.
 
+For a PR-by-PR placement guide, directory responsibilities, and validation
+requirements, start with the [Contributor Guide](../contributing/contributor-guide.md).
+
 ## Canonical tree
 
 ```text

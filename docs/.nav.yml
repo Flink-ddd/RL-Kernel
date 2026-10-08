@@ -31,8 +31,12 @@ nav:
       - operators/embedding.md
   - Developer Guide:
     - contributing/README.md
+    - Contributor Guide: contributing/contributor-guide.md
     - General:
-      - contributing/*
+      - contributing/documentation.md
+      - contributing/gtest-usage.md
+      - contributing/issue-108-session-log.md
+      - contributing/testing.md
       - contributing/operator-doc-template.md
     - Architecture:
       - architecture/*
