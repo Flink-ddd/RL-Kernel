@@ -37,6 +37,11 @@ jobs:
   unit-tests:
     needs: linting
     runs-on: ubuntu-latest
+    env:
+      # Forked CPU scorers must not inherit initialized OpenMP/MKL thread pools.
+      # Set this before importing torch, including in the parent pytest process.
+      OMP_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
