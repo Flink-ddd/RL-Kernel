@@ -15,4 +15,4 @@ Useful pages:
 
 - [Documentation Guide](documentation.md)
 - [Testing](testing.md)
-- [Runtime Dispatch](../design/runtime-dispatch.md)
+- [Runtime Dispatch](../architecture/runtime-dispatch.md)

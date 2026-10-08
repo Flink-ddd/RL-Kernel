@@ -34,8 +34,16 @@ nav:
     - General:
       - contributing/*
       - contributing/operator-doc-template.md
-    - Design Documents:
-      - design/*
+    - Architecture:
+      - architecture/*
+    - Numerical Contracts:
+      - contracts/*
+    - Integration Guides:
+      - integrations/**
+    - Validation:
+      - validation/*
+    - Design Archive:
+      - archive/design/*
   - Benchmarking:
     - benchmarking/README.md
     - benchmarking/hardware-dashboard.md

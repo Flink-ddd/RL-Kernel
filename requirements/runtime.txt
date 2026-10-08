@@ -1,0 +1,5 @@
+torch>=2.4.1
+tabulate
+numpy
+accelerate
+transformers==5.13.1
