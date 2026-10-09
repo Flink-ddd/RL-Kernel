@@ -369,8 +369,9 @@ class DetGemmOp:
         )
         if not self.has_hardware_op or any(not hasattr(_C, name) for name in required):
             raise RuntimeError("DetGemmOp.linear requires the rebuilt native-weight CUDA extension")
-        a = a.contiguous()
-        weight = weight.contiguous()
+        if det_gemm_backend() != _CUBLASLT_BACKEND:
+            a = a.contiguous()
+            weight = weight.contiguous()
         if out is not None:
             if torch.is_grad_enabled() and (a.requires_grad or weight.requires_grad):
                 raise RuntimeError("direct-output deterministic GEMM is inference-only")

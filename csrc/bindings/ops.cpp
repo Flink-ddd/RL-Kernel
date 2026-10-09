@@ -6,6 +6,9 @@
 
 // Fused LogP Declarations
 torch::Tensor fused_logp_forward(torch::Tensor logits, torch::Tensor token_ids);
+#if !defined(USE_ROCM) && !defined(KERNEL_ALIGN_WITH_ROCM)
+std::vector<torch::Tensor> ordered_logp_merge(torch::Tensor lse, torch::Tensor target);
+#endif
 
 #if defined(__CUDACC__) || defined(KERNEL_ALIGN_WITH_SM90)
 torch::Tensor fused_logp_sm90_forward(torch::Tensor logits, torch::Tensor labels);
@@ -502,6 +505,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "RL-Kernel High-Performance Operator Extension Library";
 
     m.def("fused_logp", &fused_logp_forward, "Fused logp forward fallback");
+#if !defined(USE_ROCM) && !defined(KERNEL_ALIGN_WITH_ROCM)
+    m.def("ordered_logp_merge", &ordered_logp_merge, "Rank-ordered FP32 logp merge");
+#endif
 
 #if defined(__CUDACC__) || defined(KERNEL_ALIGN_WITH_SM90)
     m.def("fused_logp_sm90", &fused_logp_sm90_forward, "TMA-accelerated Online Softmax Fused LogP");

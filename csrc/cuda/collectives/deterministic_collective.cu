@@ -237,7 +237,8 @@ __global__ void deterministic_all_reduce_fast_kernel(
 
   if constexpr (std::is_same_v<T, nv_bfloat16>) {
 #if (__CUDA_ARCH__ >= 800 || !defined(__CUDA_ARCH__))
-    const int64_t pair_count = element_count / 2;
+    const int64_t pair_count = (reinterpret_cast<uintptr_t>(output) & 3u) == 0u
+        ? element_count / 2 : 0;
     auto* pair_output = reinterpret_cast<nv_bfloat162*>(output);
     for (int64_t pair_index = threadIdx.x;
          pair_index < pair_count;
@@ -245,9 +246,8 @@ __global__ void deterministic_all_reduce_fast_kernel(
       pair_output[pair_index] =
           fixed_tree_reduce_bf16x2<WorldSize>(peers, pair_index);
     }
-    if ((element_count & 1) != 0 && threadIdx.x == 0) {
-      output[element_count - 1] =
-          fixed_tree_reduce<nv_bfloat16, WorldSize>(peers, element_count - 1);
+    for (int64_t i = pair_count * 2 + threadIdx.x; i < element_count; i += blockDim.x) {
+      output[i] = fixed_tree_reduce<nv_bfloat16, WorldSize>(peers, i);
     }
 #endif
   } else {
@@ -265,6 +265,46 @@ __global__ void deterministic_all_reduce_fast_kernel(
   }
 }
 
+#if (__CUDA_ARCH__ >= 800 || !defined(__CUDA_ARCH__))
+__device__ __forceinline__ uint4 add_bf16x8(uint4 a, uint4 b) {
+  uint4 result;
+  const auto* ap = reinterpret_cast<const nv_bfloat162*>(&a);
+  const auto* bp = reinterpret_cast<const nv_bfloat162*>(&b);
+  auto* rp = reinterpret_cast<nv_bfloat162*>(&result);
+#pragma unroll
+  for (int i = 0; i < 4; ++i) rp[i] = __hadd2(ap[i], bp[i]);
+  return result;
+}
+
+template <int WorldSize>
+__device__ __forceinline__ uint4 fixed_tree_reduce_bf16x8(
+    const PeerPointers& peers, int64_t index) {
+  const uint4 v0 = static_cast<const uint4*>(peers.values[0])[index];
+  if constexpr (WorldSize == 1) {
+    return v0;
+  } else {
+    const uint4 v1 = static_cast<const uint4*>(peers.values[1])[index];
+    const uint4 s01 = add_bf16x8(v0, v1);
+    if constexpr (WorldSize == 2) {
+      return s01;
+    } else {
+      const uint4 v2 = static_cast<const uint4*>(peers.values[2])[index];
+      const uint4 v3 = static_cast<const uint4*>(peers.values[3])[index];
+      const uint4 s03 = add_bf16x8(s01, add_bf16x8(v2, v3));
+      if constexpr (WorldSize == 4) {
+        return s03;
+      } else {
+        const uint4 v4 = static_cast<const uint4*>(peers.values[4])[index];
+        const uint4 v5 = static_cast<const uint4*>(peers.values[5])[index];
+        const uint4 v6 = static_cast<const uint4*>(peers.values[6])[index];
+        const uint4 v7 = static_cast<const uint4*>(peers.values[7])[index];
+        return add_bf16x8(s03, add_bf16x8(add_bf16x8(v4, v5), add_bf16x8(v6, v7)));
+      }
+    }
+  }
+}
+#endif
+
 // Preserve the graph-safe single-slot protocol while removing the launch
 // boundary between staging and reduction. The sequence and fixed-tree order
 // are identical to stage_payload_fast_kernel followed by
@@ -279,12 +319,16 @@ __global__ void deterministic_all_reduce_graph_safe_fused_fast_kernel(
     T* output,
     int64_t element_count,
     int64_t input_bytes) {
+  __shared__ uint64_t operation_sequence;
   if (threadIdx.x == 0) {
-    const uint64_t sequence = load_acquire_system(local_stage_sequence);
-    for (int peer = 0; peer < WorldSize; ++peer) {
-      while (load_acquire_system(peers.done_sequences[peer]) < sequence) {
-        __nanosleep(64);
-      }
+    operation_sequence = load_acquire_system(local_stage_sequence) + 1;
+  }
+  __syncthreads();
+  // Poll independent peers concurrently. The block barrier still requires
+  // every peer to retire its previous use before any payload is overwritten.
+  if (threadIdx.x < WorldSize) {
+    while (load_acquire_system(peers.done_sequences[threadIdx.x]) < operation_sequence - 1) {
+      device_relax();
     }
   }
   __syncthreads();
@@ -307,26 +351,37 @@ __global__ void deterministic_all_reduce_graph_safe_fused_fast_kernel(
 
   if (threadIdx.x == 0) {
     __threadfence_system();
-    store_release_system(
-        local_stage_sequence,
-        load_acquire_system(local_stage_sequence) + 1);
-    wait_for_stage_sequence(peers, WorldSize, local_stage_sequence);
+    store_release_system(local_stage_sequence, operation_sequence);
+  }
+  __syncthreads();
+  if (threadIdx.x < WorldSize) {
+    while (load_acquire_system(peers.stage_sequences[threadIdx.x]) < operation_sequence) {
+      device_relax();
+    }
   }
   __syncthreads();
 
   if constexpr (std::is_same_v<T, nv_bfloat16>) {
 #if (__CUDA_ARCH__ >= 800 || !defined(__CUDA_ARCH__))
-    const int64_t pair_count = element_count / 2;
+    // Wide remote loads expose independent elements; every element still
+    // follows the same BF16 binary tree. Preserve the scalar-aligned tail.
+    const bool aligned_output = (reinterpret_cast<uintptr_t>(output) & 15u) == 0u;
+    const int64_t vector_count = aligned_output ? element_count / 8 : 0;
+    auto* vector_output = reinterpret_cast<uint4*>(output);
+    for (int64_t i = threadIdx.x; i < vector_count; i += blockDim.x) {
+      vector_output[i] = fixed_tree_reduce_bf16x8<WorldSize>(peers, i);
+    }
+    const int64_t pair_count = (reinterpret_cast<uintptr_t>(output) & 3u) == 0u
+        ? element_count / 2 : 0;
     auto* pair_output = reinterpret_cast<nv_bfloat162*>(output);
-    for (int64_t pair_index = threadIdx.x;
+    for (int64_t pair_index = vector_count * 4 + threadIdx.x;
          pair_index < pair_count;
          pair_index += blockDim.x) {
       pair_output[pair_index] =
           fixed_tree_reduce_bf16x2<WorldSize>(peers, pair_index);
     }
-    if ((element_count & 1) != 0 && threadIdx.x == 0) {
-      output[element_count - 1] =
-          fixed_tree_reduce<nv_bfloat16, WorldSize>(peers, element_count - 1);
+    for (int64_t i = pair_count * 2 + threadIdx.x; i < element_count; i += blockDim.x) {
+      output[i] = fixed_tree_reduce<nv_bfloat16, WorldSize>(peers, i);
     }
 #endif
   } else {
@@ -365,7 +420,8 @@ __global__ void deterministic_all_reduce_staged_fast_kernel(
 
   if constexpr (std::is_same_v<T, nv_bfloat16>) {
 #if (__CUDA_ARCH__ >= 800 || !defined(__CUDA_ARCH__))
-    const int64_t pair_count = element_count / 2;
+    const int64_t pair_count = (reinterpret_cast<uintptr_t>(output) & 3u) == 0u
+        ? element_count / 2 : 0;
     auto* pair_output = reinterpret_cast<nv_bfloat162*>(output);
     for (int64_t pair_index = threadIdx.x;
          pair_index < pair_count;
@@ -373,9 +429,8 @@ __global__ void deterministic_all_reduce_staged_fast_kernel(
       pair_output[pair_index] =
           fixed_tree_reduce_bf16x2<WorldSize>(peers, pair_index);
     }
-    if ((element_count & 1) != 0 && threadIdx.x == 0) {
-      output[element_count - 1] =
-          fixed_tree_reduce<nv_bfloat16, WorldSize>(peers, element_count - 1);
+    for (int64_t i = pair_count * 2 + threadIdx.x; i < element_count; i += blockDim.x) {
+      output[i] = fixed_tree_reduce<nv_bfloat16, WorldSize>(peers, i);
     }
 #endif
   } else {
@@ -493,16 +548,16 @@ __global__ void deterministic_all_reduce_fused_fast_kernel(
 
   if constexpr (std::is_same_v<T, nv_bfloat16>) {
 #if (__CUDA_ARCH__ >= 800 || !defined(__CUDA_ARCH__))
-    const int64_t pair_count = element_count / 2;
+    const int64_t pair_count = (reinterpret_cast<uintptr_t>(output) & 3u) == 0u
+        ? element_count / 2 : 0;
     auto* pair_output = reinterpret_cast<nv_bfloat162*>(output);
     for (int64_t pair_index = threadIdx.x; pair_index < pair_count;
          pair_index += blockDim.x) {
       pair_output[pair_index] =
           fixed_tree_reduce_bf16x2<WorldSize>(peers, pair_index);
     }
-    if ((element_count & 1) != 0 && threadIdx.x == 0) {
-      output[element_count - 1] =
-          fixed_tree_reduce<nv_bfloat16, WorldSize>(peers, element_count - 1);
+    for (int64_t i = pair_count * 2 + threadIdx.x; i < element_count; i += blockDim.x) {
+      output[i] = fixed_tree_reduce<nv_bfloat16, WorldSize>(peers, i);
     }
 #endif
   } else {
@@ -741,28 +796,29 @@ void launch_all_reduce_graph_safe_fused_fast(
     int64_t input_bytes,
     int64_t world_size,
     cudaStream_t stream) {
+  const int threads = std::is_same_v<T, nv_bfloat16> && input_bytes >= 8192 ? 1024 : kThreads;
   switch (world_size) {
     case 1:
       deterministic_all_reduce_graph_safe_fused_fast_kernel<T, 1>
-          <<<1, kThreads, 0, stream>>>(
+          <<<1, threads, 0, stream>>>(
               peers, local_stage_sequence, local_done_sequence,
               input, payload, output, element_count, input_bytes);
       break;
     case 2:
       deterministic_all_reduce_graph_safe_fused_fast_kernel<T, 2>
-          <<<1, kThreads, 0, stream>>>(
+          <<<1, threads, 0, stream>>>(
               peers, local_stage_sequence, local_done_sequence,
               input, payload, output, element_count, input_bytes);
       break;
     case 4:
       deterministic_all_reduce_graph_safe_fused_fast_kernel<T, 4>
-          <<<1, kThreads, 0, stream>>>(
+          <<<1, threads, 0, stream>>>(
               peers, local_stage_sequence, local_done_sequence,
               input, payload, output, element_count, input_bytes);
       break;
     case 8:
       deterministic_all_reduce_graph_safe_fused_fast_kernel<T, 8>
-          <<<1, kThreads, 0, stream>>>(
+          <<<1, threads, 0, stream>>>(
               peers, local_stage_sequence, local_done_sequence,
               input, payload, output, element_count, input_bytes);
       break;

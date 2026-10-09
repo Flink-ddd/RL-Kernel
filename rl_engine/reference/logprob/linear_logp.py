@@ -383,6 +383,16 @@ def _merge_tp_local_logp(
     local_zt = gathered[:, 1, :, :].reshape(
         world_size * summaries_per_rank, local_target_summaries.size(-1)
     )
+    if (
+        local_lse.is_cuda
+        and torch.version.hip is None
+        and local_lse.dtype == local_zt.dtype == torch.float32
+        and not local_lse.requires_grad
+        and not local_zt.requires_grad
+    ):
+        from rl_engine.backends.cuda.logprob.ordered_merge import ordered_logp_merge
+
+        return ordered_logp_merge(local_lse, local_zt)
     summary_count = local_lse.size(0)
     global_max = local_lse[0].clone()
     for summary in range(1, summary_count):

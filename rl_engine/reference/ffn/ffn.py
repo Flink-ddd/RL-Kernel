@@ -146,6 +146,36 @@ def _qwen3_ffn_packed_inference_to_staging_fake(
     del rmsnorm_output, fused_gate_up_weight, down_weight, output
 
 
+@torch.library.custom_op("rl_kernel::qwen3_ffn_canonical_columns", mutates_args=())
+def _qwen3_ffn_canonical_columns(
+    hidden: Tensor,
+    gate_up_weight: Tensor,
+    down_weight: Tensor,
+    chunks: int,
+) -> Tensor:
+    """Share the column GEMM while preserving every canonical K chunk."""
+    _notify_packed_inference_observers()
+    x = hidden.reshape(-1, hidden.size(-1)).contiguous()
+    activated = _packed_gate_up_inference(x, gate_up_weight)
+    width = activated.size(1) // chunks
+    parts = [
+        det_gemm_linear(
+            activated.narrow(1, i * width, width),
+            down_weight.narrow(1, i * width, width),
+            native_op=_C.det_gemm_fwd_rhs_transposed,
+        )
+        for i in range(chunks)
+    ]
+    while len(parts) > 1:
+        parts = [parts[i] + parts[i + 1] for i in range(0, len(parts), 2)]
+    return parts[0].reshape(*hidden.shape[:-1], down_weight.size(0))
+
+
+@_qwen3_ffn_canonical_columns.register_fake
+def _qwen3_ffn_canonical_columns_fake(hidden, gate_up_weight, down_weight, chunks):
+    return hidden.new_empty((*hidden.shape[:-1], down_weight.size(0)))
+
+
 def _canonical_packed_ffn_local_output(
     rmsnorm_output: Tensor,
     fused_gate_up_weight: Tensor,
@@ -163,6 +193,13 @@ def _canonical_packed_ffn_local_output(
     intermediate = fused_gate_up_weight.size(0) // 2
     if intermediate % canonical_chunks or down_weight.size(1) != intermediate:
         raise ValueError("packed FFN weights cannot form canonical TP shards")
+    if torch.version.hip is None:
+        from rl_engine.backends.cuda.gemm.det_gemm import det_gemm_backend
+
+        if det_gemm_backend() == "cublaslt_nosplitk":
+            return _qwen3_ffn_canonical_columns(
+                rmsnorm_output, fused_gate_up_weight, down_weight, canonical_chunks
+            )
     width = intermediate // canonical_chunks
     gate_weight, up_weight = torch.split(fused_gate_up_weight, intermediate, dim=0)
     partials = []
@@ -393,6 +430,11 @@ def _canonical_tp_column_projection(
         raise ValueError(
             f"column projection rows {weight.size(0)} do not divide into {chunks} chunks"
         )
+    if torch.version.hip is None and disable_split_k:
+        from rl_engine.backends.cuda.gemm.det_gemm import det_gemm_backend
+
+        if det_gemm_backend() == "cublaslt_nosplitk":
+            return _linear_fwd(input_value, weight, disable_split_k=True)
     rows = weight.size(0) // chunks
     return torch.cat(
         [

@@ -108,6 +108,13 @@ class StrictFlashAttention4Core:
         self.api_source = api_source
         self._op = op
         self._paged_op = paged_op
+        self._paged_decode_fwd = None
+        if _op is None:
+            # Only the query tile changes. Keep the 128-key softmax blocks,
+            # no-split-KV order, GQA packing and FP32 accumulation intact.
+            fwd = getattr(importlib.import_module(api_source), "_flash_attn_fwd", None)
+            if callable(fwd) and "tile_mn" in inspect.signature(fwd).parameters:
+                self._paged_decode_fwd = fwd
         self._validated_position_layouts: dict[tuple[Any, ...], None] = {}
 
     def _validate_positions_cached(
@@ -445,12 +452,25 @@ class StrictFlashAttention4Core:
         }
         if out is not None:
             paged_kwargs["out"] = out
-        out_fa, lse = self._paged_op(
-            q,
-            k_cache,
-            v_cache,
-            **paged_kwargs,
+        small_query_tile = (
+            self._paged_decode_fwd is not None
+            and q.size(1) == 1
+            and q.size(-1) == v_cache.size(-1) == 128
+            and q.dtype == torch.bfloat16
+            and q.size(2) == 4 * k_cache.size(2)
+            and not q.requires_grad
+            and not k_cache.requires_grad
+            and not v_cache.requires_grad
+            and torch.cuda.get_device_capability(q.device)[0] == 9
         )
+        if small_query_tile:
+            forward_kwargs = dict(paged_kwargs)
+            forward_kwargs.pop("deterministic")  # backward-only public API option
+            out_fa, lse, *_ = self._paged_decode_fwd(
+                q, k_cache, v_cache, tile_mn=(64, 128), **forward_kwargs
+            )
+        else:
+            out_fa, lse = self._paged_op(q, k_cache, v_cache, **paged_kwargs)
         expected_lse_shape = (q.size(0), q.size(2), q.size(1))
         if not isinstance(out_fa, torch.Tensor) or tuple(out_fa.shape) != tuple(q.shape):
             raise StrictFlashAttentionUnavailable(
@@ -485,6 +505,7 @@ class StrictFlashAttention4Core:
                 "accum_dtype": self.accum_dtype,
                 "downcast_at": self.downcast_at,
                 "kv_layout": "paged_direct",
+                "query_tile_m": 64 if small_query_tile else "library_default",
                 "output_buffer_reused": out is not None,
                 "fallback": False,
                 "fallback_reason": None,

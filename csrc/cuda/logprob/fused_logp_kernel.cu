@@ -1,6 +1,9 @@
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAException.h>
+#if !defined(__HIPCC__) && !defined(__HIP_PLATFORM_AMD__)
+#include <c10/cuda/CUDAGuard.h>
+#endif
 #include <cuda_runtime.h>
 #include <limits>
 #include <torch/extension.h>
@@ -597,3 +600,51 @@ torch::Tensor fused_logp_forward_online_indexed_fp32(
     auto output = torch::zeros({logits.size(0)}, logits.options().dtype(at::ScalarType::Float));
     return fused_logp_forward_online_indexed_out(logits, token_ids, row_indices, output);
 }
+
+#if !defined(__HIPCC__) && !defined(__HIP_PLATFORM_AMD__)
+// Keep each PyTorch FP32 operation and its ascending-rank order explicit.
+__global__ void ordered_logp_merge_kernel(const float* lse, const float* target,
+                                        float* output, float* global_lse,
+                                        int64_t tokens, int64_t summaries,
+                                        int64_t lse_stride, int64_t target_stride) {
+    const int64_t t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= tokens) return;
+    float maximum = lse[t];
+    for (int64_t s = 1; s < summaries; ++s) {
+        const float v = lse[s * lse_stride + t];
+        maximum = isnan(maximum) || isnan(v) ? NAN : fmaxf(maximum, v);
+    }
+    float total = expf(__fsub_rn(lse[t], maximum));
+    float zt = target[t];
+    for (int64_t s = 1; s < summaries; ++s) {
+        total = __fadd_rn(total, expf(__fsub_rn(lse[s * lse_stride + t], maximum)));
+        zt = __fadd_rn(zt, target[s * target_stride + t]);
+    }
+    const float result = __fadd_rn(maximum, logf(total));
+    global_lse[t] = result;
+    output[t] = __fsub_rn(zt, result);
+}
+
+std::vector<torch::Tensor> ordered_logp_merge(torch::Tensor lse, torch::Tensor target) {
+    TORCH_CHECK(lse.is_cuda() && target.is_cuda() && lse.device() == target.device(),
+                "ordered logp merge requires tensors on the same CUDA device");
+    TORCH_CHECK(lse.scalar_type() == at::kFloat && target.scalar_type() == at::kFloat,
+                "ordered logp merge requires FP32 summaries");
+    TORCH_CHECK(lse.dim() == 2 && lse.sizes() == target.sizes() && lse.size(0) > 0,
+                "ordered logp merge requires matching [summaries, tokens] tensors");
+    TORCH_CHECK(lse.stride(1) == 1 && target.stride(1) == 1,
+                "ordered logp merge requires contiguous token rows");
+    c10::cuda::CUDAGuard guard(lse.device());
+    auto output = torch::empty({lse.size(1)}, lse.options());
+    auto global_lse = torch::empty_like(output);
+    if (lse.size(1)) {
+        ordered_logp_merge_kernel<<<(lse.size(1) + 127) / 128, 128, 0,
+                                  at::cuda::getCurrentCUDAStream()>>>(
+            lse.data_ptr<float>(), target.data_ptr<float>(), output.data_ptr<float>(),
+            global_lse.data_ptr<float>(), lse.size(1), lse.size(0), lse.stride(0), target.stride(0));
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+    }
+    return {output, global_lse};
+}
+
+#endif

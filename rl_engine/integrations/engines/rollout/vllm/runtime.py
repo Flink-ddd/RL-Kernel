@@ -986,6 +986,16 @@ def _patch_rocm_weight_cache_refresh() -> None:
     Worker.finish_weight_update = finish_weight_update_wrapped
 
 
+def _canonical_row_weight(weight, start, width):
+    part = weight.narrow(1, start, width)
+    if torch.version.hip is None:
+        from rl_engine.backends.cuda.gemm.det_gemm import det_gemm_backend
+
+        if det_gemm_backend() == "cublaslt_nosplitk":
+            return part
+    return part.contiguous()
+
+
 def _patch_qwen_ffn(integration: VllmIntegration) -> None:
     from vllm.model_executor.models.qwen2 import Qwen2MLP
 
@@ -1139,6 +1149,16 @@ def _patch_qwen3_strict_model(
                 result = result + projection_bias
             return result
 
+        if marker == "qkv" and canonical_chunks > 1 and torch.version.hip is None:
+            from rl_engine.backends.cuda.gemm.det_gemm import det_gemm_backend
+
+            if det_gemm_backend() == "cublaslt_nosplitk":
+                # Columns are independent: grouping them changes neither K nor
+                # any accumulation/reduction tree in the no-split-K backend.
+                return project(x_2d, layer.weight, bias).reshape(
+                    *x.shape[:-1], layer.weight.shape[0]
+                )
+
         if marker == "qkv" and canonical_chunks > 1:
             partition_sizes = tuple(int(size) for size in layer.output_partition_sizes)
             if len(partition_sizes) != 3 or sum(partition_sizes) != layer.weight.size(0):
@@ -1206,7 +1226,7 @@ def _patch_qwen3_strict_model(
             partials = [
                 project(
                     x_2d.narrow(1, chunk * width, width).contiguous(),
-                    layer.weight.narrow(1, chunk * width, width).contiguous(),
+                    _canonical_row_weight(layer.weight, chunk * width, width),
                 )
                 for chunk in range(canonical_chunks)
             ]
@@ -1903,6 +1923,10 @@ def install_vllm_integration(plan: IntegrationPlan) -> VllmIntegration:
     if strict_linear_logp:
         if torch.version.hip is not None:
             _patch_rocm_top_p_scan(integration)
+        else:
+            from rl_engine.integrations.engines.rollout.vllm.sampling_support import install_capture
+
+            install_capture()
         _patch_tokens_api_top_logprobs()
         _patch_qwen_lm_head_padding()
         _patch_strict_lm_head_linear()

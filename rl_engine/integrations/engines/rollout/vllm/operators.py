@@ -1467,6 +1467,12 @@ class VllmLogpOperator:
         context = None
         local_logits = None
         sampling_mask = None
+        capture_mask = False
+        from rl_engine.integrations.engines.rollout.vllm.sampling_support import (
+            capture_support,
+            supports_capture,
+        )
+
         replicated_sparse = (
             self._strict_linear_logp
             and self._worker_sampler
@@ -1547,26 +1553,43 @@ class VllmLogpOperator:
             ):
                 from rl_engine.ops.sampling.policy import sampling_keep_mask
 
-                complete_mask = sampling_keep_mask(
-                    source_logits[:, : context.real_vocab_size],
-                    temperature=support_temperature,
-                    top_p=getattr(sampling_metadata, "top_p", None),
-                    top_k=getattr(sampling_metadata, "top_k", None),
+                capture_mask = (
+                    not self._worker_sampler
+                    and bool(getattr(sampling_metadata, "all_random", False))
+                    and getattr(sampler, "logprobs_mode", None) == "processed_logprobs"
+                    and logprobs_mode_override is None
+                    and supports_capture(sampler)
                 )
-                sampling_mask = torch.zeros_like(local_logits, dtype=torch.bool)
-                sampling_mask[:, :available] = complete_mask[
-                    :, context.vocab_start_index : context.vocab_start_index + available
-                ]
-        if self._worker_sampler:
-            result = self._native_forward(sampler, logits, sampling_metadata)
-        else:
-            result = self._native_forward(
-                sampler,
-                logits,
-                sampling_metadata,
-                predict_bonus_token=predict_bonus_token,
-                logprobs_mode_override=logprobs_mode_override,
-            )
+                if not capture_mask:
+                    complete_mask = sampling_keep_mask(
+                        source_logits[:, : context.real_vocab_size],
+                        temperature=support_temperature,
+                        top_p=getattr(sampling_metadata, "top_p", None),
+                        top_k=getattr(sampling_metadata, "top_k", None),
+                    )
+                    sampling_mask = torch.zeros_like(local_logits, dtype=torch.bool)
+                    sampling_mask[:, :available] = complete_mask[
+                        :, context.vocab_start_index : context.vocab_start_index + available
+                    ]
+        with capture_support(capture_mask) as support:
+            if self._worker_sampler:
+                result = self._native_forward(sampler, logits, sampling_metadata)
+            else:
+                result = self._native_forward(
+                    sampler,
+                    logits,
+                    sampling_metadata,
+                    predict_bonus_token=predict_bonus_token,
+                    logprobs_mode_override=logprobs_mode_override,
+                )
+        if capture_mask:
+            complete_mask = support.get("mask")
+            if complete_mask is None or complete_mask.shape != source_logits.shape:
+                raise RuntimeError("native sampler did not expose its complete vocabulary support")
+            sampling_mask = torch.zeros_like(local_logits, dtype=torch.bool)
+            sampling_mask[:, :available] = complete_mask[
+                :, context.vocab_start_index : context.vocab_start_index + available
+            ]
         logprobs_tensors = getattr(result, "logprobs_tensors", None)
         if logprobs_tensors is None:
             raise RuntimeError(
