@@ -164,9 +164,11 @@ class DeterministicCollective:
     HCCL all_gather (bitwise-exact data movement) and then applies the same
     fixed-tree kernel locally -- the reduction order never depends on the HCCL
     algorithm. All ranks must call the methods in the same order with matching
-    shapes and dtypes. Calls are host-synchronizing by design; the first
-    version prioritizes determinism and lifetime safety over overlap or
-    throughput.
+    shapes and dtypes. CUDA data operations are enqueued on the caller's
+    current stream; calls sharing an instance must be stream ordered, with
+    explicit dependencies if the caller switches streams. Device sequence
+    handshakes protect staging reuse. First-use signature checks and the
+    Ascend path may synchronize the host.
     """
 
     backend_id = "cuda_ipc_fixed_tree"
@@ -556,12 +558,15 @@ class DeterministicCollective:
             if validate_signature:
                 self._validate_matching_signature("reduce_scatter", input)
             self._extension.deterministic_collective_stage(self._handle, input)
-            self._synchronize_ranks()
             if self._backend == "cuda":
+                # CUDA staging, peer readiness and payload retirement already
+                # use stream-ordered device sequence handshakes, as in AG/AR.
+                # Host-wide barriers here serialize every attention layer.
                 self._extension.deterministic_collective_reduce_scatter(self._handle, out)
             else:
+                self._synchronize_ranks()
                 self._run_reduction(input, out, slice_offset=self.rank * out.numel())
-            self._synchronize_ranks()
+                self._synchronize_ranks()
         return out
 
     def reduce_scatter_many(

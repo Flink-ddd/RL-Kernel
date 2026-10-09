@@ -521,6 +521,11 @@ def _canonical_tp_input_gradient(grad, weight, *, tp_world, column, disable_spli
     axis = 0 if column else 1
     if weight.size(axis) % chunks:
         raise ValueError("FFN gradient shard does not divide canonical TP")
+    if not column and torch.version.hip is None:
+        from rl_engine.backends.cuda.gemm.det_gemm import det_gemm_backend
+
+        if det_gemm_backend() == "cublaslt_nosplitk":
+            return _linear_da(grad, weight, disable_split_k=True)
     width = weight.size(axis) // chunks
     parts = [
         _linear_da(
@@ -544,6 +549,13 @@ def _canonical_tp_weight_gradient(a, grad, *, tp_world, column, disable_split_k)
     sharded = grad if column else a
     if sharded.size(1) % chunks:
         raise ValueError("FFN weight gradient does not divide canonical TP")
+    if torch.version.hip is None:
+        from rl_engine.backends.cuda.gemm.det_gemm import det_gemm_backend
+
+        if det_gemm_backend() == "cublaslt_nosplitk":
+            # The token reduction dimension is unchanged; only independent
+            # weight-gradient rows/columns are grouped into one GEMM.
+            return _linear_dw(a, grad, disable_split_k=True)
     width = sharded.size(1) // chunks
     parts = [
         _linear_dw(
@@ -711,15 +723,20 @@ class _DeterministicFFNFunction(torch.autograd.Function):
         if sequence_parallel:
             rmsnorm_output_2d = _all_gather_tokens(rmsnorm_output_2d, tp_collective)
 
+        combine_columns = False
+        if torch.version.hip is None and disable_split_k:
+            from rl_engine.backends.cuda.gemm.det_gemm import det_gemm_backend
+
+            combine_columns = det_gemm_backend() == "cublaslt_nosplitk"
         packed_gate_up = (
             fused_gate_up_weight is not None
             and disable_split_k
-            and _canonical_tp_chunks(tp_world) == 1
+            and (_canonical_tp_chunks(tp_world) == 1 or combine_columns)
         )
         if packed_gate_up:
             assert fused_gate_up_weight is not None
             canonical_tp = int(os.getenv("RL_KERNEL_STRICT_CANONICAL_TP", str(tp_world)))
-            if canonical_tp == tp_world:
+            if canonical_tp == tp_world or combine_columns:
                 gate_up = _linear_fwd(rmsnorm_output_2d, fused_gate_up_weight, disable_split_k=True)
             else:
                 gate_w, up_w = fused_gate_up_weight.chunk(2, dim=0)

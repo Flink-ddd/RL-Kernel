@@ -22,6 +22,7 @@ from rl_engine.backends.cuda.attention.cp_comm import (
     CUDAAGRSAttentionCPCommunication,
 )
 from rl_engine.backends.cuda.attention.flash_attn import StrictFlashAttention4Core
+from rl_engine.backends.cuda.attention.permutation import permute_sequence
 from rl_engine.contracts.operators.attention import (
     STRICT_ATTENTION_FA4_SCHEDULE_ID,
     STRICT_ATTENTION_PRODUCTION_CORE_ID,
@@ -450,67 +451,41 @@ class StrictCUDAAttentionRuntime:
 
     @staticmethod
     def _gather_sequence(tensor: torch.Tensor, order: torch.Tensor) -> torch.Tensor:
-        if tensor.ndim == 4:
-            index = order[:, None, :, None].expand(
-                tensor.size(0), tensor.size(1), order.size(1), tensor.size(3)
-            )
-        elif tensor.ndim == 3:
-            index = order[:, None, :].expand(tensor.size(0), tensor.size(1), order.size(1))
-        else:
+        if tensor.ndim not in (3, 4):
             raise RuntimeError("strict Attention sequence reorder expects a 3-D or 4-D tensor")
-        return torch.gather(tensor, 2, index).contiguous()
+        return permute_sequence(tensor, order, sequence_dim=2, batch_dim=0).contiguous()
 
     @staticmethod
-    def _gather_sequence_bshd(
-        tensor: torch.Tensor,
-        order: torch.Tensor,
-    ) -> torch.Tensor:
+    def _gather_sequence_bshd(tensor: torch.Tensor, order: torch.Tensor) -> torch.Tensor:
         if tensor.ndim != 4:
             raise RuntimeError("strict Attention BSHD reorder expects a 4-D tensor")
-        transposed = tensor.transpose(1, 2)
-        index = order[:, :, None, None].expand(
-            tensor.size(0), order.size(1), tensor.size(1), tensor.size(3)
-        )
-        return torch.gather(transposed, 1, index).contiguous()
+        return permute_sequence(
+            tensor.transpose(1, 2), order, sequence_dim=1, batch_dim=0
+        ).contiguous()
 
     @staticmethod
-    def _gather_sequence_first_bshd(
-        tensor: torch.Tensor,
-        order: torch.Tensor,
-    ) -> torch.Tensor:
+    def _gather_sequence_first_bshd(tensor: torch.Tensor, order: torch.Tensor) -> torch.Tensor:
         if tensor.ndim != 4:
             raise RuntimeError("strict Attention sequence-first BSHD reorder expects a 4-D tensor")
-        batch_major = tensor.permute(1, 0, 2, 3)
-        index = order[:, :, None, None].expand(
-            tensor.size(1), order.size(1), tensor.size(2), tensor.size(3)
-        )
-        return torch.gather(batch_major, 1, index).contiguous()
+        return permute_sequence(
+            tensor.permute(1, 0, 2, 3), order, sequence_dim=1, batch_dim=0
+        ).contiguous()
 
     @staticmethod
-    def _gather_bshd_sequence_first(
-        tensor: torch.Tensor,
-        order: torch.Tensor,
-    ) -> torch.Tensor:
+    def _gather_bshd_sequence_first(tensor: torch.Tensor, order: torch.Tensor) -> torch.Tensor:
         if tensor.ndim != 4:
             raise RuntimeError("strict Attention output reorder expects a BSHD tensor")
-        sequence_first = tensor.permute(1, 0, 2, 3)
-        index = order.transpose(0, 1)[:, :, None, None].expand(
-            order.size(1), tensor.size(0), tensor.size(2), tensor.size(3)
-        )
-        return torch.gather(sequence_first, 0, index).contiguous()
+        return permute_sequence(
+            tensor.permute(1, 0, 2, 3), order, sequence_dim=0, batch_dim=1
+        ).contiguous()
 
     @staticmethod
-    def _gather_bhs_sequence_first(
-        tensor: torch.Tensor,
-        order: torch.Tensor,
-    ) -> torch.Tensor:
+    def _gather_bhs_sequence_first(tensor: torch.Tensor, order: torch.Tensor) -> torch.Tensor:
         if tensor.ndim != 3:
             raise RuntimeError("strict Attention LSE reorder expects a BHS tensor")
-        sequence_first = tensor.permute(2, 0, 1)
-        index = order.transpose(0, 1)[:, :, None].expand(
-            order.size(1), tensor.size(0), tensor.size(1)
-        )
-        return torch.gather(sequence_first, 0, index).contiguous()
+        return permute_sequence(
+            tensor.permute(2, 0, 1), order, sequence_dim=0, batch_dim=1
+        ).contiguous()
 
     @staticmethod
     def _validate_global_positions(

@@ -702,6 +702,23 @@ __global__ void deterministic_all_reduce_kernel(
   const int64_t thread_index =
       static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   const int64_t stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
+#if (__CUDA_ARCH__ >= 800 || !defined(__CUDA_ARCH__))
+  if constexpr (std::is_same_v<T, nv_bfloat16>) {
+    // Vectorize independent elements; retain BF16 rounding at every tree node.
+    if ((reinterpret_cast<uintptr_t>(output) & 15) == 0) {
+      const int64_t vectors = element_count / 8;
+      for (int64_t index = thread_index; index < vectors; index += stride) {
+        reinterpret_cast<uint4*>(output)[index] =
+            fixed_tree_reduce_bf16x8<WorldSize>(peers, index);
+      }
+      for (int64_t index = vectors * 8 + thread_index;
+           index < element_count; index += stride) {
+        output[index] = fixed_tree_reduce<T, WorldSize>(peers, index);
+      }
+      return;
+    }
+  }
+#endif
   for (int64_t index = thread_index; index < element_count; index += stride) {
     output[index] = fixed_tree_reduce<T, WorldSize>(peers, index);
   }
@@ -715,6 +732,12 @@ void launch_all_reduce(
     int blocks,
     int64_t world_size,
     cudaStream_t stream) {
+  if constexpr (std::is_same_v<T, nv_bfloat16>) {
+    if ((reinterpret_cast<uintptr_t>(output) & 15) == 0) {
+      const int64_t work = (element_count + 7) / 8;
+      blocks = static_cast<int>(std::min<int64_t>(kMaxBlocks, (work + kThreads - 1) / kThreads));
+    }
+  }
   switch (world_size) {
     case 1:
       deterministic_all_reduce_kernel<T, 1><<<blocks, kThreads, 0, stream>>>(
@@ -1000,6 +1023,22 @@ __global__ void deterministic_reduce_scatter_kernel(
       static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   const int64_t stride = static_cast<int64_t>(gridDim.x) * blockDim.x;
   const int64_t input_offset = static_cast<int64_t>(rank) * output_element_count;
+#if (__CUDA_ARCH__ >= 800 || !defined(__CUDA_ARCH__))
+  if constexpr (std::is_same_v<T, nv_bfloat16>) {
+    if ((reinterpret_cast<uintptr_t>(output) & 15) == 0 && input_offset % 8 == 0) {
+      const int64_t vectors = output_element_count / 8;
+      for (int64_t index = thread_index; index < vectors; index += stride) {
+        reinterpret_cast<uint4*>(output)[index] =
+            fixed_tree_reduce_bf16x8<WorldSize>(peers, input_offset / 8 + index);
+      }
+      for (int64_t index = vectors * 8 + thread_index;
+           index < output_element_count; index += stride) {
+        output[index] = fixed_tree_reduce<T, WorldSize>(peers, input_offset + index);
+      }
+      return;
+    }
+  }
+#endif
   for (int64_t index = thread_index; index < output_element_count; index += stride) {
     output[index] = fixed_tree_reduce<T, WorldSize>(peers, input_offset + index);
   }
@@ -1014,6 +1053,12 @@ void launch_reduce_scatter(
     int blocks,
     int64_t world_size,
     cudaStream_t stream) {
+  if constexpr (std::is_same_v<T, nv_bfloat16>) {
+    if ((reinterpret_cast<uintptr_t>(output) & 15) == 0 && (static_cast<int64_t>(rank) * output_element_count) % 8 == 0) {
+      const int64_t work = (output_element_count + 7) / 8;
+      blocks = static_cast<int>(std::min<int64_t>(kMaxBlocks, (work + kThreads - 1) / kThreads));
+    }
+  }
   switch (world_size) {
     case 1:
       deterministic_reduce_scatter_kernel<T, 1><<<blocks, kThreads, 0, stream>>>(

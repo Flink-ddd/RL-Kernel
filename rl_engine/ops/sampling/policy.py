@@ -18,7 +18,9 @@ def sampling_keep_mask(logits, *, temperature=1.0, top_p=None, top_k=None):
     """Return the full support for scalar or per-row sampling parameters."""
     if logits.ndim != 2:
         raise ValueError("sampling logits must be [rows, real_vocab]")
-    values = logits.detach().float().clone()
+    # Conversion already owns new storage for BF16/FP16 inputs. A single
+    # explicit copy also keeps FP32 callers safe from the in-place masking.
+    values = logits.detach().to(dtype=torch.float32, copy=True)
     temp = torch.as_tensor(temperature, dtype=torch.float32, device=values.device)
     greedy = temp < 1e-5
     values.div_(torch.where(greedy, 1.0, temp).reshape(-1, 1))
@@ -38,9 +40,14 @@ def sampling_keep_mask(logits, *, temperature=1.0, top_p=None, top_k=None):
         removed = cumulative <= 1 - p.reshape(-1, 1)
         removed[:, -1] = False
         sorted_values.masked_fill_(removed, float("-inf"))
-    mask = torch.zeros_like(values, dtype=torch.bool).scatter_(
-        1, ids, torch.isfinite(sorted_values)
-    )
+    if values.is_cuda and torch.version.hip is None:
+        from rl_engine.backends.cuda.sampling.unique_scatter import scatter_permuted_columns
+
+        mask = scatter_permuted_columns(torch.isfinite(sorted_values), ids)
+    else:
+        mask = torch.zeros_like(values, dtype=torch.bool).scatter_(
+            1, ids, torch.isfinite(sorted_values)
+        )
     return torch.where(greedy.reshape(-1, 1), torch.isfinite(values), mask)
 
 
@@ -54,7 +61,7 @@ def vocab_parallel_sampling_keep_mask(
     top_p=None,
     top_k=None,
     active_rows=None,
-    chunk_size=32,
+    chunk_size=None,
 ):
     """Compute global support in bounded chunks, then retain this TP shard.
 
@@ -62,6 +69,15 @@ def vocab_parallel_sampling_keep_mask(
     participate: their token rows are independent. Inactive packed/prompt
     rows stay unmasked so discarded targets do not introduce infinities.
     """
+    if chunk_size is None:
+        # Each token row is independent. Amortize TP transport and sorting
+        # dispatches on CUDA while bounding the larger vocabulary workspace.
+        # Keep the existing ROCm/CPU workspace and explicit caller overrides.
+        chunk_size = (
+            max(32, min(128, (512 * 1024 * 1024) // (28 * real_vocab_size)))
+            if local_logits.is_cuda and torch.version.hip is None and real_vocab_size > 0
+            else 32
+        )
     if chunk_size <= 0:
         raise ValueError("sampling mask chunk size must be positive")
     initialized = dist.is_available() and dist.is_initialized()
@@ -85,9 +101,17 @@ def vocab_parallel_sampling_keep_mask(
         else:
             complete = local[:, :real_vocab_size]
         mask = sampling_keep_mask(complete, temperature=temperature, top_p=top_p, top_k=top_k)
-        selected = torch.zeros_like(local, dtype=torch.bool)
         start = rank * width
         count = max(0, min(width, real_vocab_size - start))
-        selected[:, :count] = mask[:, start : start + count]
-        keep.index_copy_(0, chunk, selected)
+        if local.is_cuda and torch.version.hip is None and count == width:
+            selected = mask[:, start : start + count]
+        else:
+            selected = torch.zeros_like(local, dtype=torch.bool)
+            selected[:, :count] = mask[:, start : start + count]
+        if keep.is_cuda and torch.version.hip is None and keep.stride(1) == 1:
+            from rl_engine.backends.cuda.sampling.unique_scatter import copy_unique_rows_
+
+            copy_unique_rows_(keep, chunk, selected)
+        else:
+            keep.index_copy_(0, chunk, selected)
     return keep

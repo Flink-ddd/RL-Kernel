@@ -65,3 +65,19 @@ def test_accelerator_device_context_is_restored():
     values = torch.tensor([3.0, -4.0], device=f"cuda:{other}")
     assert norm_from_bins(integer_square_bins([values]).cpu().tolist()) == 5.0
     assert torch.cuda.current_device() == current
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="accelerator required")
+@pytest.mark.parametrize("length", [1, 31, 32, 33, 257, 32771])
+def test_accelerator_warp_bins_with_mixed_exponents_and_nonfinite(length):
+    generator = torch.Generator(device="cuda").manual_seed(length)
+    values = torch.randn(length, generator=generator, device="cuda")
+    exponents = torch.randint(-120, 120, (length,), generator=generator, device="cuda")
+    values *= torch.pow(2.0, exponents)
+    if length >= 33:
+        values[:16] = 0.125
+        values[16:21] = torch.tensor(
+            [float("nan"), float("inf"), -float("inf"), 0.0, 2.0**-149], device="cuda"
+        )
+    actual = integer_square_bins([values]).cpu().tolist()
+    assert actual == reference_bins(values.cpu().tolist())

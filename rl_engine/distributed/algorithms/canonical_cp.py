@@ -108,7 +108,15 @@ def weight_gradient(x, dy, layout, chunks=1, column=True):
 
     if layout is not None:
         x, dy = layout.gather_many(x, dy)
-    if chunks == 1:
+    source = dy if column else x
+    if chunks != 1 and source.size(-1) % chunks:
+        raise ValueError("canonical parameter shard does not divide TP")
+    combine_columns = False
+    if torch.version.hip is None and x.is_cuda:
+        from rl_engine.backends.cuda.gemm.det_gemm import det_gemm_backend
+
+        combine_columns = det_gemm_backend() == "cublaslt_nosplitk"
+    if chunks == 1 or combine_columns:
         result = det_gemm_linear_weight_gradient(x, dy)
     else:
         source = dy if column else x

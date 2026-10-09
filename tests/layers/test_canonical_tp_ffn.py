@@ -9,6 +9,13 @@ import torch
 import rl_engine.reference.ffn.ffn as ffn
 
 
+@pytest.fixture(autouse=True)
+def select_sm90_chunk_contract(monkeypatch):
+    # These CPU mocks assert the SM90 shard-launch layout. The cuBLASLt
+    # independent-column fusion has separate CUDA byte-equality coverage.
+    monkeypatch.setenv("RL_KERNEL_DET_GEMM_BACKEND", "sm90")
+
+
 def test_single_rank_tp_group_is_treated_as_local(monkeypatch):
     group = object()
     monkeypatch.setattr(torch.distributed, "is_available", lambda: True)

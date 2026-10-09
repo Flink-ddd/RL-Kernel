@@ -855,7 +855,15 @@ def test_vllm_qwen3_strict_model_installs_without_debug_environment(monkeypatch)
     )
 
 
-def test_vllm_tp4_attention_projections_reuse_tp8_shards(monkeypatch):
+@pytest.mark.parametrize(
+    "backend,expected_calls",
+    [
+        ("sm90", [(6, 4), (6, 4), (4, 4), (4, 4)]),
+        ("cublaslt_nosplitk", [(12, 4), (4, 4), (4, 4)]),
+    ],
+)
+def test_vllm_tp4_attention_projections_reuse_tp8_shards(monkeypatch, backend, expected_calls):
+    monkeypatch.setenv("RL_KERNEL_DET_GEMM_BACKEND", backend)
     calls = []
 
     class RMSNorm:
@@ -957,7 +965,7 @@ def test_vllm_tp4_attention_projections_reuse_tp8_shards(monkeypatch):
 
     assert torch.equal(qkv, hidden @ attention.qkv_proj.weight.t())
     assert torch.equal(output, attention_core @ attention.o_proj.weight.t())
-    assert calls == [(6, 4), (6, 4), (4, 4), (4, 4)]
+    assert calls == expected_calls
 
 
 def test_vllm_rocm_rotary_reuses_one_table_for_query_and_key(monkeypatch):

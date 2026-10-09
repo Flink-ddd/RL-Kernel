@@ -27,10 +27,26 @@ extern "C" __global__ void bin_squares(const float* x, long long n,
         if (e==255) { atomicOr(out+768+(m==0),1ULL); continue; }
         if (e) m|=0x800000U;
         unsigned long long square=(unsigned long long)m*m;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+        // Integer limb sums are exact. Aggregate equal exponent bins within
+        // each active warp before the shared atomic, avoiding contention.
+        const unsigned int peers = __match_any_sync(__activemask(), e);
+        const bool leader = (threadIdx.x & 31) == __ffs(peers) - 1;
+        for (int limb=0;limb<3;++limb) {
+            const unsigned int v=(square>>(16*limb)) & 65535ULL;
+            if (__popc(peers) > 2) {
+                const unsigned int sum=__reduce_add_sync(peers,v);
+                if (leader && sum) atomicAdd(bins+e*3+limb,(unsigned long long)sum);
+            } else if (v) {
+                atomicAdd(bins+e*3+limb,(unsigned long long)v);
+            }
+        }
+#else
         for(int limb=0;limb<3;++limb) {
             unsigned long long v=(square>>(16*limb)) & 65535ULL;
             if(v) atomicAdd(bins+e*3+limb,v);
         }
+#endif
     }
     __syncthreads();
     for (int j=threadIdx.x;j<768;j+=blockDim.x)
