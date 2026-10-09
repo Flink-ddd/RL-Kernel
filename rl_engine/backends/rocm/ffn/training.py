@@ -145,9 +145,7 @@ class _RocmTrainingFFNFunction(common._DeterministicFFNFunction):
             grad_rmsnorm_from_gate = common._all_reduce_inplace(
                 grad_rmsnorm_from_gate, tp_collective
             )
-            grad_rmsnorm_from_up = common._all_reduce_inplace(
-                grad_rmsnorm_from_up, tp_collective
-            )
+            grad_rmsnorm_from_up = common._all_reduce_inplace(grad_rmsnorm_from_up, tp_collective)
 
         grad_rmsnorm_output = grad_rmsnorm_from_gate.add_(grad_rmsnorm_from_up)
         return (
@@ -166,7 +164,11 @@ class _RocmTrainingFFNFunction(common._DeterministicFFNFunction):
 def install_rocm_training_backward() -> None:
     """Install the optimized backward only inside a Megatron training worker."""
 
-    common._DeterministicFFNFunction.backward = staticmethod(_RocmTrainingFFNFunction.backward)
+    setattr(
+        common._DeterministicFFNFunction,
+        "backward",
+        staticmethod(_RocmTrainingFFNFunction.backward),
+    )
 
 
 def qwen3_ffn_training(
