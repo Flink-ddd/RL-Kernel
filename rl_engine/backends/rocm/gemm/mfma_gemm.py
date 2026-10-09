@@ -61,7 +61,7 @@ class MfmaGemmConfig:
 _DECODE_CONFIG = MfmaGemmConfig(16, 32, 2, waves_per_eu=0, num_stages=2, group_m=1)
 _QWEN_QKV_GATE_DECODE_CONFIG = MfmaGemmConfig(32, 64, 4, waves_per_eu=0, num_stages=2, group_m=1)
 _QWEN_LM_HEAD_DECODE_CONFIG = MfmaGemmConfig(16, 128, 4, waves_per_eu=2, num_stages=2, group_m=1)
-_SMALL_CONFIG = MfmaGemmConfig(64, 128, 4, waves_per_eu=2, num_stages=2, group_m=8)
+_SMALL_CONFIG = MfmaGemmConfig(128, 64, 4, waves_per_eu=2, num_stages=2, group_m=8)
 _LARGE_CONFIG = MfmaGemmConfig(128, 128, 4, waves_per_eu=2, num_stages=2, group_m=8)
 
 
