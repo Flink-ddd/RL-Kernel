@@ -551,11 +551,19 @@ class MegatronFFNOperator:
                 "context_parallel_size": cp_world,
             },
         )
+        if (
+            torch.version.hip is not None
+            and getattr(operator, "backend_id", None) == FFN_BACKEND_ID
+        ):
+            from rl_engine.backends.rocm.ffn import install_rocm_training_backward
+
+            install_rocm_training_backward()
         output = operator(
             hidden_states,
             gate,
             up,
             down,
+            fused_gate_up_weight=fused_gate_up,
             tp_group=getattr(module, "tp_group", None),
             cp_group=cp_group,
             sequence_parallel=bool(getattr(config, "sequence_parallel", False)),
@@ -573,7 +581,7 @@ class MegatronFFNOperator:
             ),
             "gemm_backend": det_gemm_backend_id(),
             "fallback": False,
-            "gate_up_projection": "separate_strict_launches",
+            "gate_up_projection": "packed_single_launch",
             "deterministic_all_reduce_backend": (
                 "none"
                 if tp_world == 1

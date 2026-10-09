@@ -6,6 +6,7 @@ import pytest
 import torch
 
 import rl_engine.reference.ffn.ffn as ffn_module
+from rl_engine.backends.rocm.ffn import qwen3_ffn_training
 from rl_engine.integrations.engines.rollout.vllm.operators import VllmFFNOperator
 from rl_engine.ops.gemm.det_gemm import DetGemmOp, det_gemm_linear_weight_gradient
 from rl_engine.runtime.registry import _default_semantic_descriptors
@@ -118,6 +119,42 @@ def test_rocm_det_linear_preserves_autograd_and_bitwise_gradients():
     assert weight.grad is not None and weight.grad.shape == weight.shape
     assert torch.equal(first_input_grad, inputs.grad)
     assert torch.equal(first_weight_grad, weight.grad)
+
+
+def test_rocm_training_packed_gate_up_matches_separate_projection_bitwise():
+    hidden = torch.randn((16, 64), device="cuda", dtype=torch.bfloat16)
+    fused_gate_up = torch.randn((256, 64), device="cuda", dtype=torch.bfloat16)
+    down = torch.randn((64, 128), device="cuda", dtype=torch.bfloat16)
+    grad_output = torch.randn_like(hidden)
+
+    def run(*, packed: bool):
+        inputs = hidden.detach().clone().requires_grad_(True)
+        packed_weight = fused_gate_up.detach().clone().requires_grad_(True)
+        gate, up = packed_weight.chunk(2, dim=0)
+        down_weight = down.detach().clone().requires_grad_(True)
+        output = qwen3_ffn_training(
+            inputs,
+            gate,
+            up,
+            down_weight,
+            fused_gate_up_weight=packed_weight if packed else None,
+            deterministic=True,
+        )
+        output.backward(grad_output)
+        return (
+            output.detach(),
+            inputs.grad.detach(),
+            packed_weight.grad.detach(),
+            down_weight.grad.detach(),
+        )
+
+    separate = run(packed=False)
+    packed = run(packed=True)
+
+    assert all(
+        torch.equal(separate_value, packed_value)
+        for separate_value, packed_value in zip(separate, packed, strict=True)
+    )
 
 
 def test_vllm_ffn_provenance_reports_rocm_triton_and_fixed_tree():

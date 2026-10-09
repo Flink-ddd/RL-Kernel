@@ -74,6 +74,60 @@ def test_vllm_tp1_ffn_reports_no_physical_collective(monkeypatch):
     assert execution["deterministic_all_reduce_backend"] == "none"
 
 
+def test_megatron_ffn_forwards_existing_packed_gate_up_weight(monkeypatch):
+    calls = []
+    fused_gate_up = torch.arange(64, dtype=torch.float32).reshape(8, 8)
+    down = torch.arange(32, dtype=torch.float32).reshape(8, 4)
+    hidden = torch.arange(16, dtype=torch.float32).reshape(2, 8)
+
+    class Backend:
+        def __call__(self, value, gate, up, down_weight, **kwargs):
+            calls.append((value, gate, up, down_weight, kwargs))
+            return value.clone()
+
+    class Handle:
+        provenance = {}
+
+        def get(self, value, *, topology):
+            assert value is hidden
+            assert topology == {
+                "world_size": 1,
+                "tensor_parallel_size": 1,
+                "context_parallel_size": 1,
+            }
+            return Backend()
+
+    parallel_state = SimpleNamespace(
+        get_context_parallel_world_size=lambda: 1,
+        get_tensor_model_parallel_world_size=lambda: 1,
+    )
+    monkeypatch.setattr(megatron_operators, "_require_nvidia_cuda", lambda *args: None)
+    monkeypatch.setattr(megatron_operators, "_megatron_parallel_state", lambda: parallel_state)
+    module = SimpleNamespace(
+        config=SimpleNamespace(
+            add_bias_linear=False,
+            gated_linear_unit=True,
+            sequence_parallel=False,
+        ),
+        linear_fc1=SimpleNamespace(weight=fused_gate_up),
+        linear_fc2=SimpleNamespace(weight=down),
+        tp_group=None,
+    )
+
+    output, bias = megatron_operators.MegatronFFNOperator(Handle())(module, hidden)
+
+    assert bias is None
+    assert torch.equal(output, hidden)
+    assert len(calls) == 1
+    value, gate, up, down_weight, kwargs = calls[0]
+    assert value is hidden
+    assert torch.equal(gate, fused_gate_up[:4])
+    assert torch.equal(up, fused_gate_up[4:])
+    assert down_weight is down
+    assert kwargs["fused_gate_up_weight"] is fused_gate_up
+    assert kwargs["deterministic"] is True
+
+
 def test_torch_dist_object_compatibility_deserializes_scalar_bytes_io(monkeypatch):
     strategy_name = "megatron.core.dist_checkpointing.strategies.torch"
     strategy = ModuleType(strategy_name)
