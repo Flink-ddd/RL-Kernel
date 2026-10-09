@@ -66,9 +66,10 @@ def test_small_query_tile_is_bitwise_equal_with_shuffled_pages(batch, length, he
 @pytest.mark.parametrize("batch", [1, 4, 64])
 def test_captured_full_support_matches_independent_policy(batch):
     from vllm.v1.sample.ops import topk_topp_sampler as native
+
     from rl_engine.integrations.engines.rollout.vllm.sampling_support import (
-        install_capture,
         capture_support,
+        install_capture,
     )
     from rl_engine.ops.sampling.policy import sampling_keep_mask
 

@@ -17,7 +17,21 @@ def main():
     world = dist.get_world_size()
     device = torch.device("cuda", rank)
     with create_deterministic_collective(max_size_bytes=64 * 2**20) as collective:
-        for length in (1, 257, 4096, 16384, 65537, 131071, 131073, 262144, 1048576, 2097153, 4194304, 8388608, 16777216):
+        for length in (
+            1,
+            257,
+            4096,
+            16384,
+            65537,
+            131071,
+            131073,
+            262144,
+            1048576,
+            2097153,
+            4194304,
+            8388608,
+            16777216,
+        ):
             for misaligned in (
                 (False, True) if os.environ.get("CHECK_MISALIGNED", "1") == "1" else (False,)
             ):

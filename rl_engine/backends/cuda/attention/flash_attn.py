@@ -108,7 +108,7 @@ class StrictFlashAttention4Core:
         self.api_source = api_source
         self._op = op
         self._paged_op = paged_op
-        self._paged_decode_fwd = None
+        self._paged_decode_fwd: Callable[..., Any] | None = None
         if _op is None:
             # Only the query tile changes. Keep the 128-key softmax blocks,
             # no-split-KV order, GQA packing and FP32 accumulation intact.
@@ -464,6 +464,7 @@ class StrictFlashAttention4Core:
             and torch.cuda.get_device_capability(q.device)[0] == 9
         )
         if small_query_tile:
+            assert self._paged_decode_fwd is not None
             forward_kwargs = dict(paged_kwargs)
             forward_kwargs.pop("deterministic")  # backward-only public API option
             out_fa, lse, *_ = self._paged_decode_fwd(

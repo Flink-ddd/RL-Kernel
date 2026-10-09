@@ -59,7 +59,13 @@ def main():
                 if rank == 0:
                     print(
                         json.dumps(
-                            dict(world=world, dtype=str(dtype), rows=rows, offset=offset, bitwise_equal=True)
+                            dict(
+                                world=world,
+                                dtype=str(dtype),
+                                rows=rows,
+                                offset=offset,
+                                bitwise_equal=True,
+                            )
                         ),
                         flush=True,
                     )

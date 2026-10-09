@@ -42,8 +42,8 @@ def test_permutation_forward_backward_matches_deterministic_gather(dtype, shape,
 @pytest.mark.parametrize("rows,width", [(1, 7), (3, 513), (32, 151936)])
 def test_unique_boolean_scatters_preserve_complete_support(rows, width):
     from rl_engine.backends.cuda.sampling.unique_scatter import (
-        scatter_permuted_columns,
         copy_unique_rows_,
+        scatter_permuted_columns,
     )
 
     torch.manual_seed(rows)

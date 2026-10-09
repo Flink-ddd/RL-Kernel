@@ -1583,6 +1583,7 @@ class VllmLogpOperator:
                     logprobs_mode_override=logprobs_mode_override,
                 )
         if capture_mask:
+            assert context is not None and local_logits is not None
             complete_mask = support.get("mask")
             if complete_mask is None or complete_mask.shape != source_logits.shape:
                 raise RuntimeError("native sampler did not expose its complete vocabulary support")
