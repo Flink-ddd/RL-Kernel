@@ -111,9 +111,9 @@ class TestNativeLogpOpBatchInvariance:
         full_out = op.forward_fp32(logits, token_ids)
         for row in range(logits.shape[0]):
             single_out = op.forward_fp32(logits[row : row + 1], token_ids[row : row + 1])
-            assert torch.equal(
-                full_out[row], single_out[0]
-            ), f"Batch invariance broken at row {row}"
+            assert torch.equal(full_out[row], single_out[0]), (
+                f"Batch invariance broken at row {row}"
+            )
 
     def test_batch_invariance_with_padding(self):
         op = NativeLogpOp()
@@ -145,9 +145,9 @@ class TestNativeLogpOpAccuracy:
         out_typed = op.forward(logits, token_ids).float()
         out_fp32 = op.forward_fp32(logits, token_ids)
         diff = (out_typed - out_fp32).abs().max().item()
-        assert torch.allclose(
-            out_typed, out_fp32, atol=atol, rtol=0.0
-        ), f"dtype={dtype}, max_abs_error={diff:.3e} exceeds atol={atol}"
+        assert torch.allclose(out_typed, out_fp32, atol=atol, rtol=0.0), (
+            f"dtype={dtype}, max_abs_error={diff:.3e} exceeds atol={atol}"
+        )
 
 
 class TestNativeLogpOpRegistry:
@@ -157,8 +157,8 @@ class TestNativeLogpOpRegistry:
 
         op = kernel_registry.get_op("logp")
         if device_ctx.is_musa:
-            from rl_engine.backends.shared.triton.logprob.logp import TritonLogpOp
+            from rl_engine.backends.musa.logprob.logp import MusaFusedLogpOp
 
-            assert isinstance(op, TritonLogpOp)
+            assert isinstance(op, MusaFusedLogpOp)
         else:
             assert isinstance(op, NativeLogpOp)

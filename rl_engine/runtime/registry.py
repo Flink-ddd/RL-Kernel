@@ -73,6 +73,7 @@ class OpBackend(Enum, metaclass=_KernelEnumMeta):
     # TMA-accelerated LogP for SM90+ (Warp Specialization)
     CUDA_FUSED_LOGP_SM90 = "rl_engine.kernels.ops.cuda.loss.logp.FusedLogpSM90Op"
     CUDA_FUSED_LOGP_GENERIC = "rl_engine.kernels.ops.cuda.loss.logp.FusedLogpGenericOp"
+    MUSA_FUSED_LOGP_GENERIC = "rl_engine.backends.musa.logprob.logp.MusaFusedLogpOp"
     CUDA_DETERMINISTIC_LOGP = "rl_engine.kernels.ops.cuda.loss.logp.DeterministicLogpCUDAOp"
     # Deterministic standard-softmax attention (issue #147); not FlashAttention.
     CUDA_DETERMINISTIC_ATTENTION = (
@@ -264,7 +265,7 @@ def _default_semantic_descriptors() -> tuple[OperatorBackendDescriptor, ...]:
             },
             lifecycle=OperatorLifecycle.DISTRIBUTED_CONTEXT,
             implementation_class_or_factory=(
-                "rl_engine.reference.logprob.vocab_parallel_logp." "VocabParallelLogprobOp"
+                "rl_engine.reference.logprob.vocab_parallel_logp.VocabParallelLogprobOp"
             ),
             fallback_policy=OperatorFallbackPolicy.ERROR,
             version_or_build_fingerprint="VocabParallelLogprobOp-fixed-tiles-v1",
@@ -650,7 +651,11 @@ class KernelRegistry:
                 "swiglu": [OpBackend.TRITON_SWIGLU, OpBackend.PYTORCH_NATIVE_SWIGLU],
             },
             "musa": {
-                "logp": [OpBackend.TRITON_LOGP, OpBackend.PYTORCH_NATIVE],
+                "logp": [
+                    OpBackend.MUSA_FUSED_LOGP_GENERIC,
+                    OpBackend.TRITON_LOGP,
+                    OpBackend.PYTORCH_NATIVE,
+                ],
                 "logp_indexed": [OpBackend.PYTORCH_NATIVE],
                 "logp_online": [OpBackend.PYTORCH_NATIVE],
                 "logp_online_indexed": [OpBackend.PYTORCH_NATIVE],

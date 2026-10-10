@@ -112,6 +112,7 @@ class TestMusaPlatform:
         assert registry._platform_for_device("musa") == "musa"
         expected = {
             "logp": [
+                OpBackend.MUSA_FUSED_LOGP_GENERIC,
                 OpBackend.TRITON_LOGP,
                 OpBackend.PYTORCH_NATIVE,
             ],
@@ -190,6 +191,7 @@ def test_npu_registry_preserves_per_operator_cpu_fallbacks(monkeypatch):
 
     monkeypatch.setattr(registry, "_load_backend", fake_load_backend)
     monkeypatch.setattr(device_ctx, "device_type", "npu")
+    monkeypatch.setattr(device_ctx, "is_rocm", False)
 
     registry.get_op("rms_norm")
 
