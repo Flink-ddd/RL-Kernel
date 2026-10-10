@@ -36,7 +36,7 @@ from typing import Any
 import torch
 from torch.profiler import ProfilerActivity, profile, record_function
 
-from rl_engine.backends.shared.triton.ffn import (
+from rl_engine.backends.rocm.ffn.triton import (
     Qwen3FFNForwardWeights,
     pack_qwen3_ffn_forward_weights,
     qwen3_ffn,
@@ -700,7 +700,7 @@ def main() -> None:
     manifest: dict[str, Any] = {
         "environment": _environment(args),
         "workload": {
-            "operator": "rl_engine.backends.shared.triton.ffn.qwen3_ffn",
+            "operator": "rl_engine.backends.rocm.ffn.triton.qwen3_ffn",
             "tokens": args.tokens,
             "hidden_size": args.hidden_size,
             "intermediate_size": args.intermediate_size,

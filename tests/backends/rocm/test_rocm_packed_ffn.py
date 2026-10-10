@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-import rl_engine.reference.ffn.ffn as ffn_module
+import rl_engine.backends.rocm.ffn.ffn as ffn_module
 from rl_engine.backends.rocm.ffn import qwen3_ffn_training
 from rl_engine.integrations.engines.rollout.vllm.operators import VllmFFNOperator
 from rl_engine.ops.gemm.det_gemm import DetGemmOp, det_gemm_linear_weight_gradient

@@ -10,8 +10,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-import rl_engine.backends.shared.triton.ffn.ffn as ffn_module
-from rl_engine.backends.shared.triton.ffn import (
+import rl_engine.backends.rocm.ffn.triton as ffn_module
+from rl_engine.backends.rocm.ffn.triton import (
     QWEN3_8B_HIDDEN_SIZE,
     QWEN3_8B_INTERMEDIATE_SIZE,
     Qwen3FFNForwardWeights,

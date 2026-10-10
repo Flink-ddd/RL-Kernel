@@ -321,10 +321,8 @@ class MatrixConfig:
             "seed": self.seed,
             "rollout_seed": self.rollout_seed,
             "mismatch_metrics_hook": (
-                (
-                    "rl_engine.integrations.orchestrators.vime.experiments.rocm_attention.tis_me"
-                    "trics.metrics_only_tis"
-                )
+                "rl_engine.integrations.orchestrators.vime.experiments.rocm_attention.tis_me"
+                "trics.metrics_only_tis"
             ),
             "ffn_case": "R/R",
             "logp_case": "R/R",
@@ -350,7 +348,7 @@ def _validate_checkpoint_marker(checkpoint: Path) -> None:
     marker = checkpoint / "latest_checkpointed_iteration.txt"
     if not marker.is_file():
         raise FileNotFoundError(
-            "reference_checkpoint is not a Megatron checkpoint: missing " f"{marker}"
+            f"reference_checkpoint is not a Megatron checkpoint: missing {marker}"
         )
     value = marker.read_text(encoding="utf-8").strip()
     if value == "release":
@@ -396,7 +394,7 @@ def _validate_rl_kernel_plugin_installation() -> None:
     if not matching:
         values = sorted({entry_point.value for entry_point in candidates})
         raise RuntimeError(
-            "the visible rl_kernel vLLM plugin entry point has an unexpected target: " f"{values!r}"
+            f"the visible rl_kernel vLLM plugin entry point has an unexpected target: {values!r}"
         )
 
     installed_name = cast(Mapping[str, str], distribution.metadata).get("Name", "RL-Kernel")
@@ -644,6 +642,9 @@ def build_arm_environment(
             "RLK_ABLATION_RAY_DASHBOARD_PORT": str(config.ray_dashboard_port + arm_index),
             "RLK_ABLATION_RAY_DASHBOARD_AGENT_PORT": str(
                 config.ray_dashboard_port + arm_index + 10_000
+            ),
+            "RLK_ABLATION_RAY_DASHBOARD_AGENT_GRPC_PORT": str(
+                config.ray_dashboard_port + arm_index + 20_000
             ),
         }
     )

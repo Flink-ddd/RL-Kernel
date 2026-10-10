@@ -329,7 +329,7 @@ def _default_semantic_descriptors() -> tuple[OperatorBackendDescriptor, ...]:
                 "strict_observable": True,
             },
             lifecycle=OperatorLifecycle.DISTRIBUTED_CONTEXT,
-            implementation_class_or_factory=("rl_engine.reference.ffn.ffn.Qwen3FFNOp"),
+            implementation_class_or_factory=("rl_engine.ops.ffn.qwen3.Qwen3FFNOp"),
             fallback_policy=OperatorFallbackPolicy.ERROR,
             version_or_build_fingerprint="Qwen3FFNOp-fixed-reduction-v1",
         ),

@@ -5,4 +5,4 @@ from importlib import import_module
 
 
 def __getattr__(name):
-    return getattr(import_module("rl_engine.backends.shared.triton.ffn"), name)
+    return getattr(import_module("rl_engine.backends.rocm.ffn.triton"), name)

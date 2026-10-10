@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 RL-Kernel Contributors
-"""Bias-free gated FFN assembled from deterministic CUDA kernels."""
+"""Bias-free gated FFN assembled from deterministic ROCm kernels."""
 
 from __future__ import annotations
 
@@ -11,12 +11,6 @@ from typing import Any
 import torch
 from torch import Tensor
 
-from rl_engine.backends.cuda.gemm.det_gemm import (
-    det_gemm_backend,
-    det_gemm_linear,
-    det_gemm_linear_input_gradient,
-    det_gemm_linear_weight_gradient,
-)
 from rl_engine.backends.extension import _C, _EXT_AVAILABLE
 from rl_engine.distributed.algorithms.collectives import _COLLECTIVES as _SHARED_COLLECTIVES
 from rl_engine.distributed.algorithms.collectives import (
@@ -24,6 +18,11 @@ from rl_engine.distributed.algorithms.collectives import (
     deterministic_all_reduce_inplace,
     deterministic_all_reduce_staged,
     deterministic_staging_reserve,
+)
+from rl_engine.ops.gemm.det_gemm import (
+    det_gemm_linear,
+    det_gemm_linear_input_gradient,
+    det_gemm_linear_weight_gradient,
 )
 
 QWEN3_8B_HIDDEN_SIZE = 4096
@@ -48,6 +47,8 @@ _COLLECTIVE_MIN_CAPACITY_BYTES = 64 * 1024 * 1024
 # Backward-compatible test hook; ownership lives in the shared communication layer.
 _COLLECTIVES = _SHARED_COLLECTIVES
 _PACKED_INFERENCE_OBSERVERS: list[Callable[[], None]] = []
+_PACKED_INFERENCE_STAGING_BY_HANDLE: dict[int, tuple[int, Tensor, Tensor]] = {}
+_PACKED_INFERENCE_SLOT_BY_RUNTIME_HANDLE: dict[int, int] = {}
 
 
 def register_packed_inference_observer(callback: Callable[[], None]) -> None:
@@ -66,11 +67,23 @@ def _notify_packed_inference_observers() -> None:
 
 
 def _packed_gate_up_inference(hidden: Tensor, weight: Tensor) -> Tensor:
+    if (
+        torch.version.hip is not None
+        and hidden.dtype == torch.bfloat16
+        and 0 < hidden.size(0) <= 64
+        and hidden.size(1) > 1024
+    ):
+        from rl_engine.backends.rocm.gemm.det_gemm import det_gemm_backend
+
+        if det_gemm_backend() == "triton_mfma":
+            from rl_engine.backends.rocm.gemm.swiglu_gemm import forward
+
+            return forward(hidden, weight)
     gate_up = det_gemm_linear(hidden, weight, native_op=_C.det_gemm_fwd_rhs_transposed)
     return _C.swiglu_packed_forward(gate_up)
 
 
-@torch.library.custom_op("rl_kernel::qwen3_ffn_packed_inference_cuda", mutates_args=())
+@torch.library.custom_op("rl_kernel::qwen3_ffn_packed_inference", mutates_args=())
 def _qwen3_ffn_packed_inference(
     rmsnorm_output: Tensor,
     fused_gate_up_weight: Tensor,
@@ -101,7 +114,7 @@ def _qwen3_ffn_packed_inference_fake(
 
 
 @torch.library.custom_op(
-    "rl_kernel::qwen3_ffn_packed_inference_to_staging_cuda",
+    "rl_kernel::qwen3_ffn_packed_inference_to_staging",
     mutates_args={"output"},
 )
 def _qwen3_ffn_packed_inference_to_staging(
@@ -133,7 +146,7 @@ def _qwen3_ffn_packed_inference_to_staging_fake(
     del rmsnorm_output, fused_gate_up_weight, down_weight, output
 
 
-@torch.library.custom_op("rl_kernel::qwen3_ffn_canonical_columns_cuda", mutates_args=())
+@torch.library.custom_op("rl_kernel::qwen3_ffn_canonical_columns", mutates_args=())
 def _qwen3_ffn_canonical_columns(
     hidden: Tensor,
     gate_up_weight: Tensor,
@@ -180,10 +193,13 @@ def _canonical_packed_ffn_local_output(
     intermediate = fused_gate_up_weight.size(0) // 2
     if intermediate % canonical_chunks or down_weight.size(1) != intermediate:
         raise ValueError("packed FFN weights cannot form canonical TP shards")
-    if det_gemm_backend() == "cublaslt_nosplitk":
-        return _qwen3_ffn_canonical_columns(
-            rmsnorm_output, fused_gate_up_weight, down_weight, canonical_chunks
-        )
+    if torch.version.hip is None:
+        from rl_engine.backends.cuda.gemm.det_gemm import det_gemm_backend
+
+        if det_gemm_backend() == "cublaslt_nosplitk":
+            return _qwen3_ffn_canonical_columns(
+                rmsnorm_output, fused_gate_up_weight, down_weight, canonical_chunks
+            )
     width = intermediate // canonical_chunks
     gate_weight, up_weight = torch.split(fused_gate_up_weight, intermediate, dim=0)
     partials = []
@@ -206,6 +222,82 @@ def _canonical_packed_ffn_local_output(
     while len(partials) > 1:
         partials = [partials[index] + partials[index + 1] for index in range(0, len(partials), 2)]
     return partials[0]
+
+
+@torch.library.custom_op(
+    "rl_kernel::qwen3_ffn_packed_tp_inference_rocm",
+    mutates_args=(),
+)
+def _qwen3_ffn_packed_tp_inference_rocm(
+    rmsnorm_output: Tensor,
+    fused_gate_up_weight: Tensor,
+    down_weight: Tensor,
+    collective_handle: int,
+    canonical_chunks: int = 1,
+) -> Tensor:
+    """Keep the ROCm TP FFN behind one eager graph-partition boundary."""
+
+    binding = _PACKED_INFERENCE_STAGING_BY_HANDLE.get(collective_handle)
+    if binding is None:
+        raise RuntimeError("packed ROCm rollout FFN staging handle is not registered")
+    runtime_handle, staging, stable_output = binding
+    input_shape = rmsnorm_output.shape
+    rows = rmsnorm_output.numel() // input_shape[-1]
+    if canonical_chunks > 1:
+        partial = _canonical_packed_ffn_local_output(
+            rmsnorm_output, fused_gate_up_weight, down_weight, canonical_chunks
+        ).reshape(rows, down_weight.shape[0])
+        output = (
+            stable_output.narrow(0, 0, rows)
+            if rows <= staging.size(0)
+            else torch.empty_like(partial).reshape(rows, down_weight.shape[0])
+        )
+        # collective_handle is an AOT-stable slot, not a C++ IPC pointer.
+        # Resolve it inside this opaque operation before the physical reduction.
+        _C.deterministic_collective_rocm_ipc_all_reduce_input(runtime_handle, partial, output)
+        return output.reshape(*input_shape[:-1], down_weight.shape[0])
+    if rows <= staging.size(0):
+        # Keep the output address stable across piecewise HIP-graph capture and
+        # replay so the next captured partition reads the current invocation.
+        direct_input = staging.narrow(0, 0, rows)
+        output = stable_output.narrow(0, 0, rows)
+        _C.deterministic_collective_rocm_ipc_prepare_staged(
+            runtime_handle,
+            direct_input,
+        )
+        _qwen3_ffn_packed_inference_to_staging(
+            rmsnorm_output,
+            fused_gate_up_weight,
+            down_weight,
+            direct_input,
+        )
+        _C.deterministic_collective_rocm_ipc_all_reduce_staged(runtime_handle, direct_input, output)
+        return output.reshape(*input_shape[:-1], down_weight.shape[0])
+    else:
+        # Profiling and uncaptured prefill can exceed the decode capture bound.
+        output = _qwen3_ffn_packed_inference(
+            rmsnorm_output,
+            fused_gate_up_weight,
+            down_weight,
+        )
+    _C.deterministic_collective_rocm_ipc_all_reduce_input(
+        runtime_handle,
+        output,
+        output,
+    )
+    return output.reshape(*input_shape[:-1], down_weight.shape[0])
+
+
+@_qwen3_ffn_packed_tp_inference_rocm.register_fake
+def _qwen3_ffn_packed_tp_inference_rocm_fake(
+    rmsnorm_output: Tensor,
+    fused_gate_up_weight: Tensor,
+    down_weight: Tensor,
+    collective_handle: int,
+    canonical_chunks: int = 1,
+) -> Tensor:
+    del fused_gate_up_weight, collective_handle, canonical_chunks
+    return rmsnorm_output.new_empty((*rmsnorm_output.shape[:-1], down_weight.shape[0]))
 
 
 def qwen3_ffn_packed_inference(
@@ -235,6 +327,24 @@ def qwen3_ffn_packed_inference(
         return canonical_local_output()
     if collective_handle <= 0:
         raise RuntimeError("packed rollout FFN requires a bound TP collective")
+    if (
+        getattr(torch.version, "hip", None) is not None
+        and collective is not None
+        and collective_handle not in _PACKED_INFERENCE_STAGING_BY_HANDLE
+    ):
+        # Eager ROCm does not reserve graph staging.  Keep its established
+        # in-place fixed-tree path; graph-enabled runs register the handle in
+        # prepare_packed_inference and stay behind the opaque custom op below.
+        output = canonical_local_output()
+        return collective.all_reduce(output, out=output)
+    if getattr(torch.version, "hip", None) is not None:
+        return _qwen3_ffn_packed_tp_inference_rocm(
+            rmsnorm_output,
+            fused_gate_up_weight,
+            down_weight,
+            collective_handle,
+            canonical_chunks,
+        )
     input_shape = rmsnorm_output.shape
     output_shape_2d = (
         rmsnorm_output.numel() // input_shape[-1],
@@ -319,8 +429,11 @@ def _canonical_tp_column_projection(
         raise ValueError(
             f"column projection rows {weight.size(0)} do not divide into {chunks} chunks"
         )
-    if disable_split_k and det_gemm_backend() == "cublaslt_nosplitk":
-        return _linear_fwd(input_value, weight, disable_split_k=True)
+    if torch.version.hip is None and disable_split_k:
+        from rl_engine.backends.cuda.gemm.det_gemm import det_gemm_backend
+
+        if det_gemm_backend() == "cublaslt_nosplitk":
+            return _linear_fwd(input_value, weight, disable_split_k=True)
     rows = weight.size(0) // chunks
     return torch.cat(
         [
@@ -407,8 +520,11 @@ def _canonical_tp_input_gradient(grad, weight, *, tp_world, column, disable_spli
     axis = 0 if column else 1
     if weight.size(axis) % chunks:
         raise ValueError("FFN gradient shard does not divide canonical TP")
-    if not column and det_gemm_backend() == "cublaslt_nosplitk":
-        return _linear_da(grad, weight, disable_split_k=True)
+    if not column and torch.version.hip is None:
+        from rl_engine.backends.cuda.gemm.det_gemm import det_gemm_backend
+
+        if det_gemm_backend() == "cublaslt_nosplitk":
+            return _linear_da(grad, weight, disable_split_k=True)
     width = weight.size(axis) // chunks
     parts = [
         _linear_da(
@@ -432,10 +548,13 @@ def _canonical_tp_weight_gradient(a, grad, *, tp_world, column, disable_split_k)
     sharded = grad if column else a
     if sharded.size(1) % chunks:
         raise ValueError("FFN weight gradient does not divide canonical TP")
-    if det_gemm_backend() == "cublaslt_nosplitk":
-        # The token reduction dimension is unchanged; only independent
-        # weight-gradient rows/columns are grouped into one GEMM.
-        return _linear_dw(a, grad, disable_split_k=True)
+    if torch.version.hip is None:
+        from rl_engine.backends.cuda.gemm.det_gemm import det_gemm_backend
+
+        if det_gemm_backend() == "cublaslt_nosplitk":
+            # The token reduction dimension is unchanged; only independent
+            # weight-gradient rows/columns are grouped into one GEMM.
+            return _linear_dw(a, grad, disable_split_k=True)
     width = sharded.size(1) // chunks
     parts = [
         _linear_dw(
@@ -512,7 +631,8 @@ def _validate_ffn_inputs(
         if tensor.dtype != torch.bfloat16:
             raise TypeError(f"{name} must have dtype bfloat16, got {tensor.dtype}.")
         if not tensor.is_cuda:
-            raise RuntimeError(f"{name} must be on a CUDA GPU device, got '{tensor.device}'.")
+            # PyTorch exposes AMD GPU tensors through the torch.cuda API too.
+            raise RuntimeError(f"{name} must be on a CUDA/ROCm GPU device, got '{tensor.device}'.")
         if tensor.device != rmsnorm_output.device:
             raise RuntimeError(
                 f"all FFN inputs must be on {rmsnorm_output.device}, got {name} on {tensor.device}."
@@ -601,7 +721,11 @@ class _DeterministicFFNFunction(torch.autograd.Function):
         if sequence_parallel:
             rmsnorm_output_2d = _all_gather_tokens(rmsnorm_output_2d, tp_collective)
 
-        combine_columns = disable_split_k and det_gemm_backend() == "cublaslt_nosplitk"
+        combine_columns = False
+        if torch.version.hip is None and disable_split_k:
+            from rl_engine.backends.cuda.gemm.det_gemm import det_gemm_backend
+
+            combine_columns = det_gemm_backend() == "cublaslt_nosplitk"
         packed_gate_up = (
             fused_gate_up_weight is not None
             and disable_split_k
@@ -878,8 +1002,9 @@ def qwen3_ffn(
             separate gate/up views, so the framework parameter layout stays
             unchanged.
         tp_group: Optional tensor-parallel process group. Gate and Up are
-            column-parallel; Down is row-parallel. Reductions use the CUDA
-            deterministic fixed-tree collectives.
+            column-parallel; Down is row-parallel. Reductions use the
+            platform deterministic fixed-tree collectives. On ROCm, RCCL only
+            transports rank inputs and the reduction tree executes locally.
         cp_group: Optional context-parallel process group. Each rank owns
             different token rows and the same local weight shards. Weight
             gradients AllGather tokens along CP and run the full-token
@@ -988,6 +1113,10 @@ class Qwen3FFNOp:
         )
         max_capture = int(os.getenv("RL_KERNEL_VLLM_CUDAGRAPH_MAX_CAPTURE_SIZE", "0"))
         if max_capture <= 0:
+            if getattr(torch.version, "hip", None) is not None:
+                collective_handle = int(collective._handle)
+                self._packed_inference_collectives[collective_handle] = collective
+                return collective_handle, tp_world_size
             raise RuntimeError("packed rollout FFN requires a positive graph capture size")
         collective.prepare_direct_staging_views(
             ((batch, int(down_weight.shape[0])) for batch in range(1, max_capture + 1)),
@@ -995,6 +1124,26 @@ class Qwen3FFNOp:
         )
         runtime_handle = int(collective._handle)
         collective_handle = runtime_handle
+        if getattr(torch.version, "hip", None) is not None:
+            staging = collective.direct_staging_view(
+                (max_capture, int(down_weight.shape[0])),
+                dtype=down_weight.dtype,
+            )
+            if staging is None:
+                raise RuntimeError("packed ROCm rollout FFN staging allocation failed")
+            collective_handle = _PACKED_INFERENCE_SLOT_BY_RUNTIME_HANDLE.get(runtime_handle, 0)
+            if collective_handle == 0:
+                # Keep the AOT graph identity stable across worker processes;
+                # resolve its process-local C++ handle inside the custom op.
+                collective_handle = len(_PACKED_INFERENCE_SLOT_BY_RUNTIME_HANDLE) + 1
+                _PACKED_INFERENCE_SLOT_BY_RUNTIME_HANDLE[runtime_handle] = collective_handle
+            binding = _PACKED_INFERENCE_STAGING_BY_HANDLE.get(collective_handle)
+            stable_output = torch.empty_like(staging) if binding is None else binding[2]
+            _PACKED_INFERENCE_STAGING_BY_HANDLE[collective_handle] = (
+                runtime_handle,
+                staging,
+                stable_output,
+            )
         self._packed_inference_collectives[collective_handle] = collective
         return collective_handle, tp_world_size
 

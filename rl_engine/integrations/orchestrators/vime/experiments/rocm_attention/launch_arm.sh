@@ -38,6 +38,7 @@ set -euo pipefail
 : "${RLK_ABLATION_RAY_PORT:?}"
 : "${RLK_ABLATION_RAY_DASHBOARD_PORT:?}"
 : "${RLK_ABLATION_RAY_DASHBOARD_AGENT_PORT:?}"
+: "${RLK_ABLATION_RAY_DASHBOARD_AGENT_GRPC_PORT:?}"
 : "${RL_KERNEL_READBACK_DIR:?}"
 : "${RL_KERNEL_MISMATCH_SIDECAR_DIR:?}"
 : "${RL_KERNEL_VLLM_REAL_VOCAB_SIZE:?}"
@@ -262,7 +263,8 @@ ray start --head \
   --disable-usage-stats \
   --dashboard-host=127.0.0.1 \
   --dashboard-port="${RLK_ABLATION_RAY_DASHBOARD_PORT}" \
-  --dashboard-agent-listen-port="${RLK_ABLATION_RAY_DASHBOARD_AGENT_PORT}"
+  --dashboard-agent-listen-port="${RLK_ABLATION_RAY_DASHBOARD_AGENT_PORT}" \
+  --dashboard-agent-grpc-port="${RLK_ABLATION_RAY_DASHBOARD_AGENT_GRPC_PORT}"
 ray_started=1
 
 ray_job_address="http://127.0.0.1:${RLK_ABLATION_RAY_DASHBOARD_PORT}"

@@ -9,7 +9,7 @@ from typing import Any
 import torch
 from torch import Tensor
 
-from rl_engine.reference.ffn import ffn as common
+from rl_engine.backends.rocm.ffn import ffn as common
 
 
 def _cp_sharded_weight_gradient(

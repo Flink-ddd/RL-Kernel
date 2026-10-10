@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Compatibility import for the platform-owned deterministic FFN."""
+# Copyright (c) 2026 RL-Kernel Contributors
+"""Import-time platform binding for the deterministic Qwen3 FFN."""
 
 import importlib
 import sys

@@ -3,7 +3,10 @@
 import pytest
 import torch
 
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+pytestmark = pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.version.hip is not None,
+    reason="CUDA required",
+)
 
 
 def test_unique_row_copy_accepts_unpacked_tp_vocab_view():
@@ -21,7 +24,7 @@ def test_unique_row_copy_accepts_unpacked_tp_vocab_view():
 
 
 def test_fused_down_gradient_still_rejects_noncanonical_shape(monkeypatch):
-    from rl_engine.reference.ffn.ffn import _canonical_tp_input_gradient
+    from rl_engine.backends.cuda.ffn.ffn import _canonical_tp_input_gradient
 
     monkeypatch.setenv("RL_KERNEL_DET_GEMM_BACKEND", "cublaslt_nosplitk")
     monkeypatch.setenv("RL_KERNEL_STRICT_CANONICAL_TP", "8")
@@ -34,7 +37,7 @@ def test_fused_down_gradient_still_rejects_noncanonical_shape(monkeypatch):
 @pytest.mark.parametrize("tokens", [1, 129, 1024])
 @pytest.mark.parametrize("canonical_tp", [2, 4, 8])
 def test_packed_training_matches_separate_gate_up(tokens, canonical_tp, monkeypatch):
-    from rl_engine.reference.ffn.ffn import qwen3_ffn
+    from rl_engine.backends.cuda.ffn.ffn import qwen3_ffn
 
     monkeypatch.setenv("RL_KERNEL_DET_GEMM_BACKEND", "cublaslt_nosplitk")
     monkeypatch.setenv("RL_KERNEL_STRICT_CANONICAL_TP", str(canonical_tp))

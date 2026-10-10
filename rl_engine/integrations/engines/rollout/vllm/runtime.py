@@ -35,7 +35,11 @@ from rl_engine.integrations.engines.rollout.vllm.operators import (
     VllmFFNOperator,
     VllmLogpOperator,
 )
-from rl_engine.reference.ffn.ffn import register_packed_inference_observer
+
+if torch.version.hip is not None:
+    from rl_engine.backends.rocm.ffn.ffn import register_packed_inference_observer
+else:
+    from rl_engine.backends.cuda.ffn.ffn import register_packed_inference_observer
 from rl_engine.reference.norm.rms_norm import strict_add_rms_norm, strict_rms_norm
 from rl_engine.runtime.plan import (
     Implementation,
@@ -439,7 +443,7 @@ def _patch_qwen3_layer_alignment_diagnostics() -> None:
             output_dir.mkdir(parents=True, exist_ok=True)
             torch.save(
                 payload,
-                output_dir / (f"vllm-pid{os.getpid()}-rank{rank:05d}-" f"call{call_index:08d}.pt"),
+                output_dir / (f"vllm-pid{os.getpid()}-rank{rank:05d}-call{call_index:08d}.pt"),
             )
         return result
 
@@ -1790,7 +1794,7 @@ def _register_attention_backend(integration: VllmIntegration) -> None:
                     or kv_cache.size(-1) != 2 * int(self.head_size)
                 ):
                     raise RuntimeError(
-                        "RL-Kernel ROCm KV cache must use " "[blocks, block, heads, 2 * head_size]"
+                        "RL-Kernel ROCm KV cache must use [blocks, block, heads, 2 * head_size]"
                     )
                 return kv_cache.split(int(self.head_size), dim=-1)
             return super()._split_kv_cache(kv_cache)
@@ -1949,7 +1953,7 @@ def install_vllm_integration(plan: IntegrationPlan) -> VllmIntegration:
         )
         integration.record_installed_hook(
             "logp",
-            "vllm.model_executor.models.qwen3.Qwen3ForCausalLM.compute_logits," f"{sampler_hook}",
+            f"vllm.model_executor.models.qwen3.Qwen3ForCausalLM.compute_logits,{sampler_hook}",
         )
     return integration
 

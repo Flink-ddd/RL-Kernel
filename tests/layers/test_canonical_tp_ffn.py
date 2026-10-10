@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-import rl_engine.reference.ffn.ffn as ffn
+import rl_engine.ops.ffn.qwen3 as ffn
 
 
 @pytest.fixture(autouse=True)
@@ -109,8 +109,9 @@ def test_tp4_reference_path_keeps_single_gemm(monkeypatch):
 
 
 def test_rollout_tp4_packed_ffn_reuses_tp8_shards(monkeypatch):
+    import rl_engine.backends.cuda.ffn.ffn as cuda_ffn
+
     calls = []
-    monkeypatch.setattr(torch.version, "hip", None)
 
     def fake_packed(input_value, fused_weight, down_weight):
         calls.append((fused_weight.shape, down_weight.shape))
@@ -120,9 +121,9 @@ def test_rollout_tp4_packed_ffn_reuses_tp8_shards(monkeypatch):
         )
 
     monkeypatch.setenv("RL_KERNEL_STRICT_CANONICAL_TP", "8")
-    monkeypatch.setattr(ffn, "_qwen3_ffn_packed_inference", fake_packed)
+    monkeypatch.setattr(cuda_ffn, "_qwen3_ffn_packed_inference", fake_packed)
     monkeypatch.setattr(
-        ffn,
+        cuda_ffn,
         "deterministic_all_reduce_inplace",
         lambda output, collective_handle: output,
     )
@@ -130,7 +131,7 @@ def test_rollout_tp4_packed_ffn_reuses_tp8_shards(monkeypatch):
     fused_gate_up = torch.zeros(16, 4)
     down = torch.zeros(4, 8)
 
-    output = ffn.qwen3_ffn_packed_inference(
+    output = cuda_ffn.qwen3_ffn_packed_inference(
         hidden,
         fused_gate_up,
         down,

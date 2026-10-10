@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 RL-Kernel Contributors
 
-from rl_engine.backends.shared.triton.ffn.ffn import (
+from rl_engine.backends.rocm.ffn.triton import (
     QWEN3_8B_HIDDEN_SIZE,
     QWEN3_8B_INTERMEDIATE_SIZE,
     Qwen3FFNForwardWeights,

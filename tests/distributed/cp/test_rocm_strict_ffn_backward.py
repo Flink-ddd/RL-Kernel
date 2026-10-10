@@ -60,7 +60,7 @@ def _run_ffn(ffn, *, rank: int, tp_rank: int, tp_group, cp_group, device: torch.
 
 def _worker(rank: int, port: int) -> None:
     from rl_engine.backends.rocm.ffn import qwen3_ffn_training
-    from rl_engine.reference.ffn.ffn import qwen3_ffn
+    from rl_engine.backends.rocm.ffn.ffn import qwen3_ffn
 
     torch.cuda.set_device(rank)
     device = torch.device("cuda", rank)

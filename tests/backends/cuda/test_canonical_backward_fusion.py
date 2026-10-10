@@ -3,7 +3,10 @@
 import pytest
 import torch
 
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+pytestmark = pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.version.hip is not None,
+    reason="CUDA required",
+)
 
 
 @pytest.mark.parametrize("tokens", [1, 513, 4096])
@@ -12,7 +15,7 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA requ
 def test_weight_gradient_matches_canonical_leaves(tokens, chunks, column, monkeypatch):
     from rl_engine.backends.cuda.gemm.det_gemm import det_gemm_linear_weight_gradient
     from rl_engine.distributed.algorithms.canonical_cp import weight_gradient
-    from rl_engine.reference.ffn.ffn import _canonical_tp_weight_gradient
+    from rl_engine.backends.cuda.ffn.ffn import _canonical_tp_weight_gradient
 
     monkeypatch.setenv("RL_KERNEL_DET_GEMM_BACKEND", "cublaslt_nosplitk")
     monkeypatch.setenv("RL_KERNEL_STRICT_CANONICAL_TP", str(4 * chunks))
@@ -39,7 +42,7 @@ def test_weight_gradient_matches_canonical_leaves(tokens, chunks, column, monkey
 @pytest.mark.parametrize("chunks", [2, 4, 8])
 def test_down_input_gradient_preserves_independent_columns(tokens, chunks, monkeypatch):
     from rl_engine.backends.cuda.gemm.det_gemm import det_gemm_linear_input_gradient
-    from rl_engine.reference.ffn.ffn import _canonical_tp_input_gradient
+    from rl_engine.backends.cuda.ffn.ffn import _canonical_tp_input_gradient
 
     monkeypatch.setenv("RL_KERNEL_DET_GEMM_BACKEND", "cublaslt_nosplitk")
     monkeypatch.setenv("RL_KERNEL_STRICT_CANONICAL_TP", str(4 * chunks))

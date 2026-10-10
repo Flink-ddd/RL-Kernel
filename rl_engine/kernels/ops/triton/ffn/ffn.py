@@ -11,6 +11,6 @@ if __package__ in (None, ""):
 if __name__ == "__main__":
     import runpy
 
-    runpy.run_module("rl_engine.backends.shared.triton.ffn.ffn", run_name="__main__")
+    runpy.run_module("rl_engine.backends.rocm.ffn.triton", run_name="__main__")
 else:
-    sys.modules[__name__] = importlib.import_module("rl_engine.backends.shared.triton.ffn.ffn")
+    sys.modules[__name__] = importlib.import_module("rl_engine.backends.rocm.ffn.triton")

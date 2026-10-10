@@ -130,13 +130,13 @@ def test_megatron_ffn_forwards_existing_packed_gate_up_weight(monkeypatch):
 
 def test_megatron_rocm_ffn_dispatches_without_global_backward_patch(monkeypatch):
     import rl_engine.backends.rocm.ffn as rocm_ffn
-    import rl_engine.reference.ffn.ffn as reference_ffn
+    import rl_engine.backends.rocm.ffn.ffn as backend_ffn
 
     calls = []
     fused_gate_up = torch.arange(64, dtype=torch.float32).reshape(8, 8)
     down = torch.arange(32, dtype=torch.float32).reshape(8, 4)
     hidden = torch.arange(16, dtype=torch.float32).reshape(2, 8)
-    original_backward = reference_ffn._DeterministicFFNFunction.backward
+    original_backward = backend_ffn._DeterministicFFNFunction.backward
 
     class Backend:
         backend_id = megatron_operators.FFN_BACKEND_ID
@@ -183,7 +183,7 @@ def test_megatron_rocm_ffn_dispatches_without_global_backward_patch(monkeypatch)
     assert bias is None
     assert torch.equal(output, hidden)
     assert len(calls) == 1
-    assert reference_ffn._DeterministicFFNFunction.backward is original_backward
+    assert backend_ffn._DeterministicFFNFunction.backward is original_backward
 
 
 def test_torch_dist_object_compatibility_deserializes_scalar_bytes_io(monkeypatch):
@@ -975,6 +975,8 @@ def test_vllm_qwen3_strict_model_installs_without_debug_environment(monkeypatch)
     ],
 )
 def test_vllm_tp4_attention_projections_reuse_tp8_shards(monkeypatch, backend, expected_calls):
+    if torch.version.hip is not None and backend == "cublaslt_nosplitk":
+        pytest.skip("cuBLASLt projection scheduling is CUDA-only")
     monkeypatch.setenv("RL_KERNEL_DET_GEMM_BACKEND", backend)
     calls = []
 

@@ -13,6 +13,7 @@ from importlib.resources import files
 from pathlib import Path
 
 import pytest
+import torch
 
 from rl_engine.runtime.provenance.identity import stable_operator_path
 
@@ -30,6 +31,32 @@ ROOT = Path(__file__).resolve().parents[2]
     ],
 )
 def test_legacy_imports_share_module_and_state(legacy, canonical, shared_object):
+    old = importlib.import_module(legacy)
+    new = importlib.import_module(canonical)
+    assert old is new
+    assert getattr(old, shared_object) is getattr(new, shared_object)
+
+
+@pytest.mark.parametrize(
+    ("legacy", "canonical", "shared_object"),
+    [
+        (
+            "rl_engine.reference.ffn.ffn",
+            (
+                "rl_engine.backends.rocm.ffn.ffn"
+                if torch.version.hip is not None
+                else "rl_engine.backends.cuda.ffn.ffn"
+            ),
+            "Qwen3FFNOp",
+        ),
+        (
+            "rl_engine.backends.shared.triton.ffn.ffn",
+            "rl_engine.backends.rocm.ffn.triton",
+            "qwen3_ffn",
+        ),
+    ],
+)
+def test_ffn_compatibility_imports_share_platform_modules(legacy, canonical, shared_object):
     old = importlib.import_module(legacy)
     new = importlib.import_module(canonical)
     assert old is new

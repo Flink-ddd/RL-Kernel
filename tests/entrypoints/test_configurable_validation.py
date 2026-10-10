@@ -9,7 +9,7 @@ import torch
 import rl_engine.entrypoints.repro as repro
 import rl_engine.integrations.orchestrators.vime.experiments.dense.validate_run as validator
 import rl_engine.integrations.orchestrators.vime.experiments.rocm_attention.validate_artifacts as artifacts  # noqa: E501
-import rl_engine.reference.ffn.ffn as ffn
+import rl_engine.ops.ffn.qwen3 as ffn
 from rl_engine.entrypoints.repro import _resolved_paths, _runner_command, build_parser
 from rl_engine.integrations.engines.train.megatron.operators import _MegatronCPWeightGradient
 from rl_engine.integrations.orchestrators.vime.experiments.dense.run_arm import _rollout_topology

@@ -1,14 +1,17 @@
 import pytest
 import torch
 
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+pytestmark = pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.version.hip is not None,
+    reason="CUDA required",
+)
 
 
 @pytest.mark.parametrize("batch", [1, 4, 64, 257])
 @pytest.mark.parametrize("chunks", [2, 4, 8])
 def test_fused_columns_preserve_canonical_ffn_bits(batch, chunks, monkeypatch):
     monkeypatch.setenv("RL_KERNEL_DET_GEMM_BACKEND", "cublaslt_nosplitk")
-    from rl_engine.reference.ffn.ffn import (
+    from rl_engine.backends.cuda.ffn.ffn import (
         _qwen3_ffn_canonical_columns,
         _qwen3_ffn_packed_inference,
     )

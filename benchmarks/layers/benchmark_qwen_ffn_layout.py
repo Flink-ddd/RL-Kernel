@@ -68,7 +68,7 @@ from benchmarks.layers.vllm_batch_invariant_matmul import (  # noqa: E402
     matmul_persistent,
 )
 from rl_engine.backends.extension import _C, _EXT_AVAILABLE  # noqa: E402
-from rl_engine.reference.ffn import qwen3_ffn  # noqa: E402
+from rl_engine.ops.ffn import qwen3_ffn  # noqa: E402
 
 SCHEMA_VERSION = 4
 LEGACY_COMMIT = "7207ebd"
