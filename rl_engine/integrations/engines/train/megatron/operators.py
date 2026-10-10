@@ -551,14 +551,16 @@ class MegatronFFNOperator:
                 "context_parallel_size": cp_world,
             },
         )
-        if (
+        use_rocm_training_ffn = (
             torch.version.hip is not None
             and getattr(operator, "backend_id", None) == FFN_BACKEND_ID
-        ):
-            from rl_engine.backends.rocm.ffn import install_rocm_training_backward
+        )
+        ffn = operator
+        if use_rocm_training_ffn:
+            from rl_engine.backends.rocm.ffn import qwen3_ffn_training
 
-            install_rocm_training_backward()
-        output = operator(
+            ffn = qwen3_ffn_training
+        output = ffn(
             hidden_states,
             gate,
             up,

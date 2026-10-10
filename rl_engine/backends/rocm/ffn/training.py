@@ -12,18 +12,34 @@ from torch import Tensor
 from rl_engine.reference.ffn import ffn as common
 
 
-def _fast_input_gradient(grad_output: Tensor, weight: Tensor) -> Tensor:
-    """Use rocBLAS for training-only dX while strict forward stays unchanged."""
+def _cp_sharded_weight_gradient(
+    a: Tensor,
+    grad: Tensor,
+    *,
+    collective: Any,
+    tp_world: int,
+    column: bool,
+    disable_split_k: bool,
+) -> Tensor:
+    """Compute independent output rows once across context-parallel ranks."""
 
-    with torch.no_grad():
-        return torch.matmul(grad_output, weight)
-
-
-def _fast_weight_gradient(a: Tensor, grad_output: Tensor) -> Tensor:
-    """Use rocBLAS for rank-local training-only dW."""
-
-    with torch.no_grad():
-        return torch.matmul(grad_output.t(), a)
+    world_size = int(collective.world_size)
+    output_rows = int(grad.size(1))
+    if output_rows % world_size:
+        raise ValueError(
+            "CP-sharded FFN weight-gradient rows must divide evenly across ranks, "
+            f"got {output_rows} rows and world_size={world_size}."
+        )
+    rows_per_rank = output_rows // world_size
+    row_start = int(collective.rank) * rows_per_rank
+    local = common._canonical_tp_weight_gradient(
+        a,
+        grad.narrow(1, row_start, rows_per_rank).contiguous(),
+        tp_world=tp_world,
+        column=column,
+        disable_split_k=disable_split_k,
+    )
+    return collective.all_gather(local.contiguous())
 
 
 def _packed_gate_up_weight_gradients(
@@ -33,12 +49,28 @@ def _packed_gate_up_weight_gradients(
     *,
     tp_world: int,
     disable_split_k: bool,
+    cp_collective: Any = None,
 ) -> tuple[Tensor, Tensor]:
-    """Share one rank-local rocBLAS GEMM across packed gate/up rows."""
+    """Share one deterministic GEMM across packed gate/up rows."""
 
-    del tp_world, disable_split_k
     grad_gate_up = torch.cat((grad_gate, grad_up), dim=1).contiguous()
-    grad_gate_up_weight = _fast_weight_gradient(a, grad_gate_up)
+    if cp_collective is None:
+        grad_gate_up_weight = common._canonical_tp_weight_gradient(
+            a,
+            grad_gate_up,
+            tp_world=tp_world,
+            column=True,
+            disable_split_k=disable_split_k,
+        )
+    else:
+        grad_gate_up_weight = _cp_sharded_weight_gradient(
+            a,
+            grad_gate_up,
+            collective=cp_collective,
+            tp_world=tp_world,
+            column=True,
+            disable_split_k=disable_split_k,
+        )
     return grad_gate_up_weight.chunk(2, dim=0)
 
 
@@ -67,21 +99,28 @@ class _RocmTrainingFFNFunction(common._DeterministicFFNFunction):
                 down_weight,
             ) = ctx.saved_tensors
         tp_collective = ctx.tp_collective
+        cp_collective = ctx.cp_collective
         disable_split_k = ctx.disable_split_k
         grad_output = grad_output.reshape(-1, grad_output.size(-1)).contiguous()
         if ctx.sequence_parallel:
             grad_output = common._all_gather_tokens(grad_output, tp_collective)
 
-        grad_activated = _fast_input_gradient(grad_output, down_weight)
+        grad_activated = common._canonical_tp_input_gradient(
+            grad_output,
+            down_weight,
+            tp_world=ctx.tp_world,
+            column=False,
+            disable_split_k=disable_split_k,
+        )
         if ctx.packed_gate_up:
             grad_gate, grad_up = common._C.swiglu_packed_backward(grad_activated, gate_up)
         else:
             grad_gate, grad_up = common._C.swiglu_backward(grad_activated, gate, up)
 
-        if ctx.cp_collective is not None or ctx.cp_layout is not None:
+        if cp_collective is not None or ctx.cp_layout is not None:
             gather = (
                 (lambda *values, **kw: values)
-                if ctx.cp_collective is None
+                if cp_collective is None
                 else common._all_gather_packed_tokens
             )
             (
@@ -96,7 +135,7 @@ class _RocmTrainingFFNFunction(common._DeterministicFFNFunction):
                 rmsnorm_output,
                 grad_gate,
                 grad_up,
-                collective=ctx.cp_collective,
+                collective=cp_collective,
             )
             if ctx.cp_layout is not None:
                 activated_full, grad_output_full, rmsnorm_full, grad_gate_full, grad_up_full = (
@@ -109,7 +148,23 @@ class _RocmTrainingFFNFunction(common._DeterministicFFNFunction):
                         grad_up_full,
                     )
                 )
-            grad_down_weight = _fast_weight_gradient(activated_full, grad_output_full)
+            if cp_collective is None:
+                grad_down_weight = common._canonical_tp_weight_gradient(
+                    activated_full,
+                    grad_output_full,
+                    tp_world=ctx.tp_world,
+                    column=False,
+                    disable_split_k=disable_split_k,
+                )
+            else:
+                grad_down_weight = _cp_sharded_weight_gradient(
+                    activated_full,
+                    grad_output_full,
+                    collective=cp_collective,
+                    tp_world=ctx.tp_world,
+                    column=False,
+                    disable_split_k=disable_split_k,
+                )
             if ctx.packed_gate_up:
                 grad_gate_weight, grad_up_weight = _packed_gate_up_weight_gradients(
                     rmsnorm_full,
@@ -117,12 +172,48 @@ class _RocmTrainingFFNFunction(common._DeterministicFFNFunction):
                     grad_up_full,
                     tp_world=ctx.tp_world,
                     disable_split_k=disable_split_k,
+                    cp_collective=cp_collective,
+                )
+            elif cp_collective is None:
+                grad_gate_weight = common._canonical_tp_weight_gradient(
+                    rmsnorm_full,
+                    grad_gate_full,
+                    tp_world=ctx.tp_world,
+                    column=True,
+                    disable_split_k=disable_split_k,
+                )
+                grad_up_weight = common._canonical_tp_weight_gradient(
+                    rmsnorm_full,
+                    grad_up_full,
+                    tp_world=ctx.tp_world,
+                    column=True,
+                    disable_split_k=disable_split_k,
                 )
             else:
-                grad_gate_weight = _fast_weight_gradient(rmsnorm_full, grad_gate_full)
-                grad_up_weight = _fast_weight_gradient(rmsnorm_full, grad_up_full)
+                grad_gate_weight = _cp_sharded_weight_gradient(
+                    rmsnorm_full,
+                    grad_gate_full,
+                    collective=cp_collective,
+                    tp_world=ctx.tp_world,
+                    column=True,
+                    disable_split_k=disable_split_k,
+                )
+                grad_up_weight = _cp_sharded_weight_gradient(
+                    rmsnorm_full,
+                    grad_up_full,
+                    collective=cp_collective,
+                    tp_world=ctx.tp_world,
+                    column=True,
+                    disable_split_k=disable_split_k,
+                )
         else:
-            grad_down_weight = _fast_weight_gradient(activated, grad_output)
+            grad_down_weight = common._canonical_tp_weight_gradient(
+                activated,
+                grad_output,
+                tp_world=ctx.tp_world,
+                column=False,
+                disable_split_k=disable_split_k,
+            )
             if ctx.packed_gate_up:
                 grad_gate_weight, grad_up_weight = _packed_gate_up_weight_gradients(
                     rmsnorm_output,
@@ -132,11 +223,35 @@ class _RocmTrainingFFNFunction(common._DeterministicFFNFunction):
                     disable_split_k=disable_split_k,
                 )
             else:
-                grad_gate_weight = _fast_weight_gradient(rmsnorm_output, grad_gate)
-                grad_up_weight = _fast_weight_gradient(rmsnorm_output, grad_up)
+                grad_gate_weight = common._canonical_tp_weight_gradient(
+                    rmsnorm_output,
+                    grad_gate,
+                    tp_world=ctx.tp_world,
+                    column=True,
+                    disable_split_k=disable_split_k,
+                )
+                grad_up_weight = common._canonical_tp_weight_gradient(
+                    rmsnorm_output,
+                    grad_up,
+                    tp_world=ctx.tp_world,
+                    column=True,
+                    disable_split_k=disable_split_k,
+                )
 
-        grad_rmsnorm_from_gate = _fast_input_gradient(grad_gate, gate_weight)
-        grad_rmsnorm_from_up = _fast_input_gradient(grad_up, up_weight)
+        grad_rmsnorm_from_gate = common._canonical_tp_input_gradient(
+            grad_gate,
+            gate_weight,
+            tp_world=ctx.tp_world,
+            column=True,
+            disable_split_k=disable_split_k,
+        )
+        grad_rmsnorm_from_up = common._canonical_tp_input_gradient(
+            grad_up,
+            up_weight,
+            tp_world=ctx.tp_world,
+            column=True,
+            disable_split_k=disable_split_k,
+        )
         if ctx.sequence_parallel:
             grad_rmsnorm_from_gate, grad_rmsnorm_from_up = tp_collective.reduce_scatter_many(
                 (grad_rmsnorm_from_gate, grad_rmsnorm_from_up)
@@ -159,16 +274,6 @@ class _RocmTrainingFFNFunction(common._DeterministicFFNFunction):
             None,
             None,
         )
-
-
-def install_rocm_training_backward() -> None:
-    """Install the optimized backward only inside a Megatron training worker."""
-
-    setattr(
-        common._DeterministicFFNFunction,
-        "backward",
-        staticmethod(_RocmTrainingFFNFunction.backward),
-    )
 
 
 def qwen3_ffn_training(
@@ -213,4 +318,4 @@ def qwen3_ffn_training(
     )
 
 
-__all__ = ["install_rocm_training_backward", "qwen3_ffn_training"]
+__all__ = ["qwen3_ffn_training"]

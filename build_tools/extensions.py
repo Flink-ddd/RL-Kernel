@@ -10,6 +10,50 @@ from distutils.spawn import find_executable
 from pathlib import Path
 
 from setuptools import Extension
+from setuptools.command.build_py import build_py as _BuildPy
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _resolve_package_data_source(
+    filename: str | os.PathLike[str],
+    *,
+    project_root: Path | None = None,
+) -> Path:
+    """Dereference JSON package data, including symlink-disabled checkouts."""
+
+    source = Path(filename)
+    if source.suffix != ".json":
+        return source
+
+    root = (project_root or _PROJECT_ROOT).resolve()
+    if source.is_symlink():
+        target = source.resolve(strict=True)
+    else:
+        if not source.is_file() or source.stat().st_size > 4096:
+            return source
+        text = source.read_text(encoding="utf-8").strip()
+        if not text or text.startswith(("{", "[")) or "\n" in text:
+            return source
+        if not text.endswith(".json"):
+            return source
+        target = (source.parent / text).resolve()
+        if not target.is_file():
+            raise FileNotFoundError(f"package-data JSON link target does not exist: {target}")
+
+    if not target.is_relative_to(root):
+        raise ValueError(f"package-data JSON link escapes the project root: {source} -> {target}")
+    if target.suffix != ".json":
+        raise ValueError(f"package-data JSON link does not target JSON: {source} -> {target}")
+    return target
+
+
+class _DereferencePackageDataBuildPy(_BuildPy):
+    """Copy target bytes instead of symlink metadata into wheels."""
+
+    def copy_file(self, infile, outfile, *args, **kwargs):
+        source = _resolve_package_data_source(infile)
+        return super().copy_file(str(source), outfile, *args, **kwargs)
 
 
 def _load_envs_module():
@@ -443,8 +487,9 @@ def _bisheng_compile_cmd(ext, ext_fullpath):
 
 def get_cmdclass():
     _, BuildExtension, _ = _load_torch_extension_tools()
+    commands = {"build_py": _DereferencePackageDataBuildPy}
     if BuildExtension is None:
-        return {}
+        return commands
 
     class AscendBuildExtension(BuildExtension):
         """torch BuildExtension + bisheng path for language="asc" extensions."""
@@ -460,4 +505,5 @@ def get_cmdclass():
             except Exception as e:
                 raise CompileError(str(e)) from e
 
-    return {"build_ext": AscendBuildExtension}
+    commands["build_ext"] = AscendBuildExtension
+    return commands

@@ -128,6 +128,64 @@ def test_megatron_ffn_forwards_existing_packed_gate_up_weight(monkeypatch):
     assert kwargs["deterministic"] is True
 
 
+def test_megatron_rocm_ffn_dispatches_without_global_backward_patch(monkeypatch):
+    import rl_engine.backends.rocm.ffn as rocm_ffn
+    import rl_engine.reference.ffn.ffn as reference_ffn
+
+    calls = []
+    fused_gate_up = torch.arange(64, dtype=torch.float32).reshape(8, 8)
+    down = torch.arange(32, dtype=torch.float32).reshape(8, 4)
+    hidden = torch.arange(16, dtype=torch.float32).reshape(2, 8)
+    original_backward = reference_ffn._DeterministicFFNFunction.backward
+
+    class Backend:
+        backend_id = megatron_operators.FFN_BACKEND_ID
+
+        def __call__(self, *_args, **_kwargs):
+            raise AssertionError("ROCm training must call its dedicated autograd function")
+
+    class Handle:
+        provenance = {}
+
+        def get(self, _value, *, topology):
+            assert topology == {
+                "world_size": 1,
+                "tensor_parallel_size": 1,
+                "context_parallel_size": 1,
+            }
+            return Backend()
+
+    def training_ffn(value, gate, up, down_weight, **kwargs):
+        calls.append((value, gate, up, down_weight, kwargs))
+        return value.clone()
+
+    parallel_state = SimpleNamespace(
+        get_context_parallel_world_size=lambda: 1,
+        get_tensor_model_parallel_world_size=lambda: 1,
+    )
+    monkeypatch.setattr(torch.version, "hip", "test", raising=False)
+    monkeypatch.setattr(megatron_operators, "_require_nvidia_cuda", lambda *args: None)
+    monkeypatch.setattr(megatron_operators, "_megatron_parallel_state", lambda: parallel_state)
+    monkeypatch.setattr(rocm_ffn, "qwen3_ffn_training", training_ffn)
+    module = SimpleNamespace(
+        config=SimpleNamespace(
+            add_bias_linear=False,
+            gated_linear_unit=True,
+            sequence_parallel=False,
+        ),
+        linear_fc1=SimpleNamespace(weight=fused_gate_up),
+        linear_fc2=SimpleNamespace(weight=down),
+        tp_group=None,
+    )
+
+    output, bias = megatron_operators.MegatronFFNOperator(Handle())(module, hidden)
+
+    assert bias is None
+    assert torch.equal(output, hidden)
+    assert len(calls) == 1
+    assert reference_ffn._DeterministicFFNFunction.backward is original_backward
+
+
 def test_torch_dist_object_compatibility_deserializes_scalar_bytes_io(monkeypatch):
     strategy_name = "megatron.core.dist_checkpointing.strategies.torch"
     strategy = ModuleType(strategy_name)

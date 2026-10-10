@@ -10,6 +10,8 @@ import setuptools
 import torch
 from torch.utils import cpp_extension
 
+from build_tools.extensions import _resolve_package_data_source, get_cmdclass
+
 
 def _load_extension_config(monkeypatch, *, hip: str | None) -> dict[str, Any]:
     captured: dict[str, Any] = {}
@@ -53,3 +55,27 @@ def test_cuda_build_keeps_existing_ipc_collective(monkeypatch) -> None:
     assert "-DKERNEL_ALIGN_WITH_CUDA" in extension["extra_compile_args"]["cxx"]
     assert "-DKERNEL_ALIGN_WITH_ROCM" not in extension["extra_compile_args"]["cxx"]
     assert "-lcuda" in extension["extra_link_args"]
+
+
+def test_package_data_json_links_resolve_to_real_content(tmp_path) -> None:
+    target = tmp_path / "configs" / "profile.json"
+    target.parent.mkdir()
+    target.write_text('{"name": "profile"}\n', encoding="utf-8")
+    source = tmp_path / "rl_engine" / "profile.json"
+    source.parent.mkdir()
+    source.symlink_to("../configs/profile.json")
+
+    assert _resolve_package_data_source(source, project_root=tmp_path) == target
+
+    source.unlink()
+    source.write_text("../configs/profile.json", encoding="utf-8")
+    assert _resolve_package_data_source(source, project_root=tmp_path) == target
+
+
+def test_package_data_real_json_is_not_reinterpreted(tmp_path) -> None:
+    source = tmp_path / "rl_engine" / "profile.json"
+    source.parent.mkdir()
+    source.write_text('{"name": "profile"}\n', encoding="utf-8")
+
+    assert _resolve_package_data_source(source, project_root=tmp_path) == source
+    assert "build_py" in get_cmdclass()

@@ -157,6 +157,42 @@ def test_rocm_training_packed_gate_up_matches_separate_projection_bitwise():
     )
 
 
+def test_rocm_training_backward_matches_reference_bitwise():
+    hidden = torch.randn((16, 64), device="cuda", dtype=torch.bfloat16)
+    fused_gate_up = torch.randn((256, 64), device="cuda", dtype=torch.bfloat16)
+    down = torch.randn((64, 128), device="cuda", dtype=torch.bfloat16)
+    grad_output = torch.randn_like(hidden)
+
+    def run(ffn):
+        inputs = hidden.detach().clone().requires_grad_(True)
+        packed_weight = fused_gate_up.detach().clone().requires_grad_(True)
+        gate, up = packed_weight.chunk(2, dim=0)
+        down_weight = down.detach().clone().requires_grad_(True)
+        output = ffn(
+            inputs,
+            gate,
+            up,
+            down_weight,
+            fused_gate_up_weight=packed_weight,
+            deterministic=True,
+        )
+        output.backward(grad_output)
+        return (
+            output.detach(),
+            inputs.grad.detach(),
+            packed_weight.grad.detach(),
+            down_weight.grad.detach(),
+        )
+
+    reference = run(ffn_module.qwen3_ffn)
+    specialized = run(qwen3_ffn_training)
+
+    assert all(
+        torch.equal(reference_value, specialized_value)
+        for reference_value, specialized_value in zip(reference, specialized, strict=True)
+    )
+
+
 def test_vllm_ffn_provenance_reports_rocm_triton_and_fixed_tree():
     operator = VllmFFNOperator()
     operator._set_runtime_provenance(4, "rocm_ipc_fixed_tree")
