@@ -16,8 +16,8 @@ from rl_engine.contracts.operators.logprob import (
     ReductionSpec,
     ShardingSpec,
 )
-from rl_engine.reference.attention import AttentionAblationOp
 from rl_engine.ops.ffn import Qwen3FFNOp
+from rl_engine.reference.attention import AttentionAblationOp
 from rl_engine.reference.logprob.vocab_parallel_logp import VocabParallelLogprobOp
 from rl_engine.runtime.operators import selected_logprobs_with_operator
 from rl_engine.runtime.registry import KernelRegistry
