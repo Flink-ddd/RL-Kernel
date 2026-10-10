@@ -194,14 +194,54 @@ class TorchDistributedDeterministicCollective:
         *,
         validate_signature: bool = True,
     ) -> tuple[torch.Tensor, ...]:
-        """Gather several tensors through the platform transport."""
+        """Gather several tensors through one grouped platform transport."""
 
         values = tuple(inputs)
         if not values:
             raise ValueError("all_gather_many requires at least one input")
-        return tuple(
-            self.all_gather(value, validate_signature=validate_signature) for value in values
+        for value in values:
+            self._validate_gather_input(value)
+        outputs = tuple(
+            torch.empty(
+                (value.size(0) * self.world_size, *value.shape[1:]),
+                dtype=value.dtype,
+                device=value.device,
+            )
+            for value in values
         )
+        if self.world_size == 1:
+            for output, value in zip(outputs, values, strict=True):
+                output.copy_(value)
+            return outputs
+
+        with self._lock:
+            self._check_open()
+            if validate_signature:
+                signatures = tuple((tuple(value.shape), str(value.dtype)) for value in values)
+                self._validate_matching_signature(
+                    f"all_gather_many:{signatures}",
+                    values[0],
+                )
+            if self._direct_all_gather_many(values, outputs):
+                return outputs
+
+        first = values[0]
+        can_pack = first.dim() >= 2 and all(
+            value.dim() == first.dim()
+            and value.shape[:-1] == first.shape[:-1]
+            and value.device == first.device
+            and value.dtype == first.dtype
+            for value in values
+        )
+        packed_bytes = sum(value.numel() * value.element_size() for value in values)
+        if can_pack and packed_bytes <= self.max_size_bytes:
+            lane_sizes = tuple(int(value.size(-1)) for value in values)
+            gathered = self.all_gather(
+                torch.cat(values, dim=-1),
+                validate_signature=False,
+            )
+            return tuple(part.contiguous() for part in gathered.split(lane_sizes, dim=-1))
+        return tuple(self.all_gather(value, validate_signature=False) for value in values)
 
     def reduce_scatter(
         self,
@@ -570,6 +610,13 @@ class TorchDistributedDeterministicCollective:
     def _direct_all_gather(self, input: torch.Tensor, output: torch.Tensor) -> bool:
         return False
 
+    def _direct_all_gather_many(
+        self,
+        inputs: tuple[torch.Tensor, ...],
+        outputs: tuple[torch.Tensor, ...],
+    ) -> bool:
+        return False
+
     @staticmethod
     def _balanced_tree_sum(rank_inputs: torch.Tensor) -> torch.Tensor:
         world_size = rank_inputs.size(0)
@@ -831,6 +878,31 @@ class RCCLDeterministicCollective(TorchDistributedDeterministicCollective):
             input,
             output,
         )
+        return True
+
+    def _direct_all_gather_many(
+        self,
+        inputs: tuple[torch.Tensor, ...],
+        outputs: tuple[torch.Tensor, ...],
+    ) -> bool:
+        # Small gathers use the lower-latency IPC path individually.  The FFN
+        # context-parallel payloads are larger, so group their RCCL operations
+        # into one launch without packing or copying tensor contents.
+        if any(
+            value.numel() * value.element_size() <= _ROCM_IPC_ALL_GATHER_MAX_BYTES
+            for value in inputs
+        ):
+            return False
+        coalescing_manager = getattr(dist, "_coalescing_manager", None)
+        if coalescing_manager is None:
+            return False
+        with coalescing_manager(group=self.group, device=self.device):
+            for output, value in zip(outputs, inputs, strict=True):
+                dist.all_gather_into_tensor(
+                    output.view(-1),
+                    value.view(-1),
+                    group=self.group,
+                )
         return True
 
     def close(self) -> None:

@@ -74,6 +74,20 @@ def test_mi300_small_batch_config_selection():
     assert M.select_config(1024, 4096, 3072) == expected
 
 
+def test_qwen_gate_up_large_config_selection():
+    expected = M.MfmaGemmConfig(
+        128,
+        256,
+        8,
+        waves_per_eu=1,
+        num_stages=2,
+        group_m=8,
+    )
+
+    assert M.select_config(2048, 3072, 4096) == expected
+    assert M.select_config(2048, 4096, 3072) != expected
+
+
 @pytest.mark.parametrize("k_size,n_size", QWEN_TP4_SHAPES)
 def test_forward_matches_fp32_reference(k_size, n_size):
     a = _rand(300, k_size)

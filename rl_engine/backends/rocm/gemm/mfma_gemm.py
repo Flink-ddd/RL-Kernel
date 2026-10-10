@@ -63,6 +63,14 @@ _QWEN_QKV_GATE_DECODE_CONFIG = MfmaGemmConfig(32, 64, 4, waves_per_eu=0, num_sta
 _QWEN_LM_HEAD_DECODE_CONFIG = MfmaGemmConfig(16, 128, 4, waves_per_eu=2, num_stages=2, group_m=1)
 _SMALL_CONFIG = MfmaGemmConfig(128, 64, 4, waves_per_eu=2, num_stages=2, group_m=8)
 _LARGE_CONFIG = MfmaGemmConfig(128, 128, 4, waves_per_eu=2, num_stages=2, group_m=8)
+_QWEN_GATE_UP_LARGE_CONFIG = MfmaGemmConfig(
+    128,
+    256,
+    8,
+    waves_per_eu=1,
+    num_stages=2,
+    group_m=8,
+)
 
 
 def select_config(m_size: int, n_size: int, k_size: int) -> MfmaGemmConfig:
@@ -79,6 +87,8 @@ def select_config(m_size: int, n_size: int, k_size: int) -> MfmaGemmConfig:
         return _DECODE_CONFIG
     if m_size <= 1024:
         return _SMALL_CONFIG
+    if k_size == 4096 and n_size == 3072:
+        return _QWEN_GATE_UP_LARGE_CONFIG
     return _LARGE_CONFIG
 
 

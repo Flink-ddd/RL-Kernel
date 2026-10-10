@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from typing import Any
 
 import pytest
@@ -37,7 +38,9 @@ class _FakeDistributed:
         self.into_tensor_calls = 0
         self.list_transport_calls = 0
         self.object_gather_calls = 0
+        self.coalescing_manager_calls = 0
         self.last_transport_output: torch.Tensor | None = None
+        self.peer_inputs_by_transport: list[list[torch.Tensor]] | None = None
 
     @property
     def tensor_transport_calls(self) -> int:
@@ -75,10 +78,20 @@ class _FakeDistributed:
         *,
         group: Any,
     ) -> None:
+        peers = (
+            self.peer_inputs
+            if self.peer_inputs_by_transport is None
+            else self.peer_inputs_by_transport[self.into_tensor_calls]
+        )
         self.into_tensor_calls += 1
         self.last_transport_output = output
-        gathered = torch.cat([peer.reshape(-1) for peer in self.peer_inputs])
+        gathered = torch.cat([peer.reshape(-1) for peer in peers])
         output.copy_(gathered)
+
+    def _coalescing_manager(self, *, group: Any, device: torch.device):
+        del group, device
+        self.coalescing_manager_calls += 1
+        return nullcontext()
 
     def all_gather(
         self,
@@ -189,6 +202,57 @@ def test_all_gather_is_rank_ordered_and_transport_only(
     assert fake_dist.tensor_transport_calls == 1
 
 
+def test_all_gather_many_packs_same_row_lanes_and_transports_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lane_peers = [
+        (
+            torch.full((2, 3), rank, dtype=torch.bfloat16),
+            torch.full((2, 2), rank + 10, dtype=torch.bfloat16),
+        )
+        for rank in range(4)
+    ]
+    packed_peers = [torch.cat(lanes, dim=-1) for lanes in lane_peers]
+    collective, fake_dist = _make_collective(monkeypatch, packed_peers, rank=2)
+
+    outputs = collective.all_gather_many(lane_peers[2])
+
+    assert fake_dist.tensor_transport_calls == 1
+    assert all(output.is_contiguous() for output in outputs)
+    assert torch.equal(outputs[0], torch.cat([lanes[0] for lanes in lane_peers], dim=0))
+    assert torch.equal(outputs[1], torch.cat([lanes[1] for lanes in lane_peers], dim=0))
+
+
+def test_rocm_all_gather_many_groups_large_lanes_without_repacking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lane_peers = [
+        (
+            torch.full((257, 512), rank, dtype=torch.bfloat16),
+            torch.full((257, 640), rank + 10, dtype=torch.bfloat16),
+        )
+        for rank in range(2)
+    ]
+    collective, fake_dist = _make_collective(
+        monkeypatch,
+        [lanes[0] for lanes in lane_peers],
+        backend="nccl",
+        max_size_bytes=1024 * 1024,
+    )
+    fake_dist.peer_inputs_by_transport = [
+        [lanes[lane] for lanes in lane_peers] for lane in range(2)
+    ]
+    collective.__class__ = RCCLDeterministicCollective
+
+    outputs = collective.all_gather_many(lane_peers[0])
+
+    assert fake_dist.coalescing_manager_calls == 1
+    assert fake_dist.into_tensor_calls == 2
+    assert all(output.is_contiguous() for output in outputs)
+    assert torch.equal(outputs[0], torch.cat([lanes[0] for lanes in lane_peers], dim=0))
+    assert torch.equal(outputs[1], torch.cat([lanes[1] for lanes in lane_peers], dim=0))
+
+
 def test_nccl_backend_uses_all_gather_into_tensor_transport(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -258,11 +322,11 @@ def test_latest_collective_api_can_skip_signature_handshakes(
     collective.all_reduce(peers[0], validate_signature=False)
     collective.all_gather(peers[0], validate_signature=False)
     collective.reduce_scatter(peers[0], validate_signature=False)
+    fake_dist.peer_inputs = [torch.cat((peer, peer), dim=-1) for peer in peers]
     gathered = collective.all_gather_many(
         (peers[0], peers[0]),
         validate_signature=False,
     )
-    fake_dist.peer_inputs = [torch.cat((peer, peer), dim=-1) for peer in peers]
     scattered = collective.reduce_scatter_many(
         (peers[0], peers[0]),
         validate_signature=False,
