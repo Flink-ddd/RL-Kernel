@@ -112,6 +112,7 @@ class TestMusaPlatform:
         assert registry._platform_for_device("musa") == "musa"
         expected = {
             "logp": [
+                OpBackend.MUSA_FUSED_LOGP_GENERIC,
                 OpBackend.TRITON_LOGP,
                 OpBackend.PYTORCH_NATIVE,
             ],

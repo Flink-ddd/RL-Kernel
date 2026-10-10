@@ -157,8 +157,8 @@ class TestNativeLogpOpRegistry:
 
         op = kernel_registry.get_op("logp")
         if device_ctx.is_musa:
-            from rl_engine.kernels.ops.triton.loss.logp import TritonLogpOp
+            from rl_engine.kernels.ops.cuda.loss.logp import FusedLogpGenericOp
 
-            assert isinstance(op, TritonLogpOp)
+            assert isinstance(op, FusedLogpGenericOp)
         else:
             assert isinstance(op, NativeLogpOp)
